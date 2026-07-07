@@ -1,3 +1,9 @@
+from random import randint as rnd, choice as ch
+
+days = ('mon', 'tue', 'wed', 'thu', 'fri')
+ops = ('OP1', 'OP2', 'OP3', 'OP4', 'OP5', 'OP6')
+opt = (5, 10, 15, 25, 40, 50)
+
 class Client():
     def __init__(self, day, arrival_min, op_id, branch_id):
         self.day = day
@@ -24,5 +30,4 @@ class Window():
         self.employee = None
 
 
-
-
+clients = [Client(ch(days), rnd(0, 540), 
