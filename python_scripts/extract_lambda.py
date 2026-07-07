@@ -38,5 +38,5 @@ for j in ('lambda_count', 'lph'):
         plt.xlabel('Час дня')
         plt.ylabel('День недели')
         plt.tight_layout()
-        plt.savefig('/home/you/bmm/' +i+ f'_lambda_heatmap{j}.png', dpi=150)
+        plt.savefig('/home/you/bmm/heatmaps/ +i+ f'_lambda_heatmap{j}.png', dpi=150)
         print(f"Heatmap сохранён в {i} lambda_heatmap{j}.png")
