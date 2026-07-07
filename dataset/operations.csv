@@ -1,0 +1,7 @@
+operation_id,name,avg_service_min,std_service_min,min_service_min,frequency_weight,required_skill
+OP01,Платежи и переводы,5,2,2,0.3,basic
+OP02,Выдача/замена карты,10,3,5,0.2,basic
+OP03,Открытие/закрытие вклада,15,5,8,0.15,basic
+OP04,Консультация по кредиту,25,8,10,0.15,credit
+OP05,Оформление кредита,40,10,20,0.1,credit
+OP06,Ипотечная консультация,50,15,25,0.05,mortgage
