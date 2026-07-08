@@ -1,0 +1,23 @@
+employee_id,branch_id,name,grade,skills,max_hours_week,max_hours_day,lunch_min,hourly_cost_rub
+BR01-E01,BR01,Максим Лебедев,senior,"basic,credit,mortgage",40,9,60,700
+BR01-E02,BR01,Дмитрий Козлов,middle,"basic,credit",40,9,60,500
+BR01-E03,BR01,Дарья Васильева,middle,"basic,credit",40,9,60,500
+BR01-E04,BR01,Владимир Егоров,senior,"basic,credit,mortgage",40,9,60,700
+BR01-E05,BR01,Роман Васильев,junior,basic,40,9,60,350
+BR01-E06,BR01,Светлана Соколова,senior,"basic,credit,mortgage",40,9,60,700
+BR01-E07,BR01,Ирина Волкова,middle,"basic,credit",40,9,60,500
+BR01-E08,BR01,Иван Иванов,junior,basic,40,9,60,350
+BR01-E09,BR01,Алина Зайцева,junior,basic,40,9,60,350
+BR01-E10,BR01,Сергей Новиков,senior,"basic,credit,mortgage",40,9,60,700
+BR02-E01,BR02,Полина Тарасова,senior,"basic,credit,mortgage",40,9,60,700
+BR02-E02,BR02,Дарья Васильева,middle,"basic,credit",40,9,60,500
+BR02-E03,BR02,Светлана Соколова,middle,"basic,credit",40,9,60,500
+BR02-E04,BR02,Наталья Морозова,senior,"basic,credit,mortgage",40,9,60,700
+BR02-E05,BR02,Елена Козлова,senior,"basic,credit,mortgage",40,9,60,700
+BR02-E06,BR02,Денис Зайцев,junior,basic,40,9,60,350
+BR03-E01,BR03,Наталья Морозова,senior,"basic,credit,mortgage",40,9,60,700
+BR03-E02,BR03,Елена Козлова,middle,"basic,credit",40,9,60,500
+BR03-E03,BR03,Артём Соколов,middle,"basic,credit",40,9,60,500
+BR03-E04,BR03,Ольга Новикова,junior,basic,40,9,60,350
+BR03-E05,BR03,Екатерина Лебедева,middle,"basic,credit",40,9,60,500
+BR03-E06,BR03,Алексей Петров,middle,"basic,credit",40,9,60,500

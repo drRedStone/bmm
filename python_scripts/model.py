@@ -71,19 +71,31 @@ clients = [Client(i['weekday'], i['arrival_datetime'].minute + i['arrival_dateti
 #сортируем клиентов
 clients.sort(key = lambda c: (days.index(c.day), c.arrival_min))
 
-wins = [Window(None) for _ in range(5)]
-
 
 #перебираем клиентов
-i = 0
-for day in days:
-    while (i<len(clients))  and (clients[i].day == day):
+def simulate(clients, n_wins):
+    wins = [Window(None) for _ in range(n_wins)]
+    #симулируем
+    i = 0
+    for day in days:
+        while (i<len(clients))  and (clients[i].day == day):
+            idx = wins.index(min(wins, key = lambda w: w.free_time))
+            clients[i].wait_time = wins[idx].free_time - clients[i].arrival_min
+            if clients[i].wait_time<0: clients[i].wait_time = 0
+            wins[idx].free_time = clients[i].arrival_min + clients[i].wait_time + clients[i].serv_time
+            i+=1
+        for win in wins: win.free_time = 540
+    
+    #считаем метрики
+    waits = [c.wait_time for c in clients]
+    for i in clients: i.wait = 0
+    av_wait = sum(waits)/len(waits)
+    max_wait = max(waits)
+    over15 = sum(1 for w in waits if w > 15)/len(waits)*100
+    return av_wait, max_wait, over15
 
-       idx = wins.index(min(wins, key = lambda w: w.free_time))
-       clients[i].wait_time = wins[idx].free_time - clients[i].arrival_min
-       if clients[i].wait_time<0: clients[i].wait_time = 0
-       wins[idx].free_time = clients[i].arrival_min + clients[i].wait_time + clients[i].serv_time
-       i+=1
-    for win in wins: win.free_time = 540
+print("кол-во окон|среднее ждание|максимальное ждание|процйент>15мин")
+for i in range(1, 6):
+        l = simulate(clients, i)
+        print(f"{i} | {l[0]} | {l[1]} | {l[2]}")
 
-for i in clients: print(round(i.wait_time), end = " ")
