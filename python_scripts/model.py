@@ -46,7 +46,7 @@ clients.sort(key = lambda c: (days.index(c.day), c.arrival_min))
 
 #перебираем клиентов
 def stat_simulate(clients, n_wins):
-   wins = [Window(None) for _ in range(n_wins)]
+    wins = [Window(None) for _ in range(n_wins)]
     #симулируем
     i = 0
     for day in days:
@@ -68,7 +68,7 @@ def stat_simulate(clients, n_wins):
 
 print("кол-во окон|среднее ждание|максимальное ждание|процйент>15мин")
 for i in range(1, 6):
-    l = simulate(clients, i)
+    l = stat_simulate(clients, i)
     print(f"{i} | {l[0]} | {l[1]} | {l[2]}")
 
 #пробуем менять количество окон в симуляции

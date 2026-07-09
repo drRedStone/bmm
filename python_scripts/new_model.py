@@ -1,3 +1,31 @@
+
+days = ('Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб')
+
+class Client():
+    def __init__(self, day, arrival_min, op_id, branch_id, serv_t = 0):
+        self.day = day
+        self.arrival_min = arrival_min
+        self.op_id = op_id
+        self.branch_id = branch_id
+        self.serv_time = serv_t
+        self.wait_time = 0
+
+
+class Employee():
+    def __init__ (self, emp_id, branch_id, grade, name):
+        self.emp_id = emp_id
+        self.branch_id = branch_id
+        self.grade = grade
+        self.name = name
+        self.worked_hours = 0
+
+
+class Window():
+    def __init__(self, branch_id):
+        self.branch_id = branch_id
+        self.free_time = 540
+        self.employee = None
+
 def simulate_day(clients, window_schedule):
     """
     Симулирует день с переменным числом окон по часам.
@@ -41,7 +69,6 @@ def simulate_day(clients, window_schedule):
         results[(current_hour)] = avg_wait
     
     return results
-
 
 # Итеративный подбор числа окон
 window_schedule = {hour: 1 for hour in range(9, 19)}
