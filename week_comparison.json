@@ -3,7 +3,7 @@
     "summary": {
       "naive": {
         "total_cost": 149100,
-        "weighted_avg_wait": 25.96028819767922,
+        "weighted_avg_wait": 25.960288197679212,
         "total_shortfall": 35
       },
       "greedy": {
@@ -20,7 +20,7 @@
     "max_util": {
       "naive": 0.75,
       "greedy": 1.0,
-      "ilp": 0.88
+      "ilp": 0.95
     }
   },
   "BR02": {
@@ -44,7 +44,7 @@
     "max_util": {
       "naive": 0.8,
       "greedy": 1.0,
-      "ilp": 1.0
+      "ilp": 0.97
     }
   },
   "BR03": {
@@ -68,7 +68,7 @@
     "max_util": {
       "naive": 0.8,
       "greedy": 1.0,
-      "ilp": 0.97
+      "ilp": 1.0
     }
   }
 }
