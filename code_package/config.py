@@ -10,5 +10,3 @@ WEEKDAY_HOURS = {  # (open_hour, close_hour) — из branches.csv: будни 0
 }
 
 OPEN_HOUR = 9 # чекать, где используется и менять на обращение к словарю
-CLOSE_HOUR = 19
-# SAT_CLOSE_TIME = 0  забыл
