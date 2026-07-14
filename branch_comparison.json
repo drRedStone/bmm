@@ -1,0 +1,71 @@
+{
+  "BR01": {
+    "naive": {
+      "avg_wait": 37.06018255909951,
+      "cost": 27600,
+      "n_staff": 6,
+      "shortfall_total": 7
+    },
+    "greedy": {
+      "avg_wait": 34.878968826648126,
+      "cost": 32150,
+      "n_staff": 8,
+      "shortfall_total": 4
+    },
+    "ilp": {
+      "avg_wait": 30.132512493893202,
+      "cost": 28650,
+      "n_staff": 10,
+      "shortfall_total": 1
+    },
+    "n_employees_total": 10,
+    "n_credit_plus": 7,
+    "n_senior": 4
+  },
+  "BR02": {
+    "naive": {
+      "avg_wait": 13.655384238579163,
+      "cost": 19200,
+      "n_staff": 4,
+      "shortfall_total": 4
+    },
+    "greedy": {
+      "avg_wait": 23.708281790209057,
+      "cost": 21800,
+      "n_staff": 5,
+      "shortfall_total": 4
+    },
+    "ilp": {
+      "avg_wait": 17.339529082277,
+      "cost": 21500,
+      "n_staff": 6,
+      "shortfall_total": 1
+    },
+    "n_employees_total": 6,
+    "n_credit_plus": 5,
+    "n_senior": 3
+  },
+  "BR03": {
+    "naive": {
+      "avg_wait": 55.93611054767144,
+      "cost": 16400,
+      "n_staff": 4,
+      "shortfall_total": 5
+    },
+    "greedy": {
+      "avg_wait": 38.80999473203513,
+      "cost": 19800,
+      "n_staff": 6,
+      "shortfall_total": 2
+    },
+    "ilp": {
+      "avg_wait": 37.12266558073502,
+      "cost": 18700,
+      "n_staff": 6,
+      "shortfall_total": 1
+    },
+    "n_employees_total": 6,
+    "n_credit_plus": 5,
+    "n_senior": 1
+  }
+}

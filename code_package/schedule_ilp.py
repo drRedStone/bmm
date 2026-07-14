@@ -31,9 +31,10 @@ from scipy.optimize import milp, LinearConstraint, Bounds
 from schedule_greedy import generate_patterns, Pattern
 from required_windows import required_windows_table
 
+from config import WEEKDAY_HOURS, MAX_HOURS_WEEK
 
 def schedule_day_ilp(employees: pd.DataFrame, req: pd.DataFrame, open_hour: int, close_hour: int,
-                      n_windows_max: int, max_hours_week: int = 40, weekly_hours_used: dict = None):
+                      n_windows_max: int, max_hours_week: int = MAX_HOURS_WEEK, weekly_hours_used: dict = None):
     """
     Жёсткая версия ILP: находит расписание МИНИМАЛЬНОЙ стоимости, которое
     ОБЯЗАТЕЛЬНО закрывает весь требуемый спрос (R_total/R_credit/R_mortgage)
@@ -167,7 +168,7 @@ def schedule_day_ilp(employees: pd.DataFrame, req: pd.DataFrame, open_hour: int,
 
 
 def schedule_day_ilp_soft(employees: pd.DataFrame, req: pd.DataFrame, open_hour: int, close_hour: int,
-                           n_windows_max: int, max_hours_week: int = 40, weekly_hours_used: dict = None,
+                           n_windows_max: int, max_hours_week: int = MAX_HOURS_WEEK, weekly_hours_used: dict = None,
                            penalty_total: float = 8000, penalty_credit: float = 6000, penalty_mortgage: float = 6000):
     """
     Мягкая версия ILP: физический потолок окон (n_windows_max) остаётся
@@ -324,12 +325,6 @@ def schedule_day_ilp_soft(employees: pd.DataFrame, req: pd.DataFrame, open_hour:
     return assignments, coverage_df, 'optimal', new_weekly, shortfall_summary
 
 
-WEEKDAY_HOURS = {  # будни 09-19, суббота 09-16, воскресенье закрыто (branches.csv одинаков для всех отделений)
-    'Monday': (9, 19), 'Tuesday': (9, 19), 'Wednesday': (9, 19),
-    'Thursday': (9, 19), 'Friday': (9, 19), 'Saturday': (9, 16),
-}
-
-
 def schedule_week_ilp(client_arrivals: pd.DataFrame, operations: pd.DataFrame, employees: pd.DataFrame,
                        branches: pd.DataFrame, branch_id: str):
     """
@@ -366,7 +361,7 @@ def schedule_week_ilp(client_arrivals: pd.DataFrame, operations: pd.DataFrame, e
         results[weekday] = dict(assignments=assignments, coverage=coverage, status=status, shortfall=shortfall)
 
     summary = pd.DataFrame([
-        dict(employee_id=eid, hours_this_week=h, utilization=round(h/40, 2))
+        dict(employee_id=eid, hours_this_week=h, utilization=round(h/MAX_HOURS_WEEK, 2))
         for eid, h in weekly_hours_used.items()
     ]).sort_values('hours_this_week', ascending=False)
     return results, summary
@@ -387,11 +382,11 @@ if __name__ == '__main__':
     branch_emp = emp[emp['branch_id'] == BRANCH]
 
     print("=== ЖЁСТКАЯ версия (доказывает infeasibility) ===")
-    _, _, status_hard, _ = schedule_day_ilp(branch_emp, req, 9, 19, n_win)
+    _, _, status_hard, _ = schedule_day_ilp(branch_emp, req, *WEEKDAY_HOURS[WEEKDAY_EN], n_win)
     print("Статус:", status_hard)
 
     print("\n=== МЯГКАЯ версия (ILP, глобальный оптимум) ===")
-    assignments_ilp, coverage_ilp, status, hu, shortfall = schedule_day_ilp_soft(branch_emp, req, 9, 19, n_win)
+    assignments_ilp, coverage_ilp, status, hu, shortfall = schedule_day_ilp_soft(branch_emp, req, *WEEKDAY_HOURS[WEEKDAY_EN], n_win)
     print("Статус:", status, "| Недобор (total/credit/mortgage):", shortfall)
     sched_ilp = pd.DataFrame(assignments_ilp)
     print(sched_ilp[['employee_id', 'grade', 'start', 'end', 'lunch_hour', 'paid_hours', 'shift_cost']]
@@ -399,7 +394,7 @@ if __name__ == '__main__':
     print(f"Сотрудников: {len(assignments_ilp)}, ФОТ за день: {sched_ilp['shift_cost'].sum():.0f} руб.")
 
     print("\n=== ЖАДНЫЙ (для сравнения) ===")
-    assignments_greedy, coverage_greedy, unresolved, _ = schedule_day(branch_emp, req, 9, 19, n_windows_max=n_win)
+    assignments_greedy, coverage_greedy, unresolved, _ = schedule_day(branch_emp, req, *WEEKDAY_HOURS[WEEKDAY_EN], n_windows_max=n_win)
     sched_greedy = pd.DataFrame(assignments_greedy)
     print(f"Сотрудников: {len(assignments_greedy)}, ФОТ за день: {sched_greedy['shift_cost'].sum():.0f} руб.")
     greedy_shortfall_total = (coverage_greedy['R_total'] - coverage_greedy['cov_total']).clip(lower=0).sum()

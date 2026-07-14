@@ -113,7 +113,7 @@ def min_windows_erlang(lam_per_hour: float, avg_service_min: float,
 
 
 def min_skill_servers(lam_skill_per_hour: float, avg_service_min: float,
-                       safety_buffer: int = 1) -> int:
+                       safety_buffer: int = 1, safety_trashold: float = 0.3) -> int:
     """
     Оценивает минимальное число серверов конкретной квалификации (credit
     или mortgage), необходимое для под-потока клиентов этого типа.
@@ -123,7 +123,7 @@ def min_skill_servers(lam_skill_per_hour: float, avg_service_min: float,
     очень шумные, скачкообразные оценки. Вместо этого используем более
     грубое, но устойчивое правило: минимум серверов, чтобы загрузка была
     < 1 (иначе очередь по этому под-потоку растёт неограниченно), плюс
-    запас в safety_buffer окно(а) на пиковую изменчивость, если нагрузка
+    запас в safety_buffer окно(а) на пиковую изменчивость, если нагрузка (safety_trashold)
     заметная (a > 0.3 Эрланга) — иначе буфер не добавляем, чтобы не
     завышать требование на почти пустых часах.
 
@@ -142,7 +142,7 @@ def min_skill_servers(lam_skill_per_hour: float, avg_service_min: float,
         return 0
     mu = 60.0 / avg_service_min
     a = lam_skill_per_hour / mu
-    return math.ceil(a) + (safety_buffer if a > 0.3 else 0)
+    return math.ceil(a) + (safety_buffer if a > safety_trashold else 0)
 
 
 def required_windows_table(client_arrivals: pd.DataFrame, operations: pd.DataFrame,

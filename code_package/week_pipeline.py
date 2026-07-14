@@ -11,12 +11,13 @@ week_pipeline.py
 import pandas as pd
 import numpy as np
 from required_windows import required_windows_table, erlang_c_wait_minutes
-from schedule_greedy import schedule_week, WEEKDAY_HOURS
+from schedule_greedy import schedule_week
 from schedule_ilp import schedule_week_ilp
 from compare_policies import coverage_from_assignments, avg_wait_for_coverage
 
+from config import MAX_WORK_TIME, MAX_WORK_TIME_BEFORE_LAUNCH, WEEKDAY_HOURS, MIN_WORK_TIME, MAX_HOURS_WEEK
 
-def naive_schedule_week(employees: pd.DataFrame, n_windows_max: int, max_hours_week: int = 40):
+def naive_schedule_week(employees: pd.DataFrame, n_windows_max: int, max_hours_week: int = MAX_HOURS_WEEK):
     """
     Недельная версия наивного расписания ("все выходят на 9:00, обед по
     очереди"), но с поправкой на трудовое законодательство: если КАЖДЫЙ
@@ -50,8 +51,8 @@ def naive_schedule_week(employees: pd.DataFrame, n_windows_max: int, max_hours_w
     emp_records = employees.to_dict('records')
 
     for weekday, (open_h, close_h) in WEEKDAY_HOURS.items():
-        span = min(9, close_h - open_h)  # суббота короче будней (7ч), полная 9ч смена не влезает
-        lunch_hour = open_h + span // 2 if span >= 6 else None
+        span = min(MAX_WORK_TIME, close_h - open_h)  # суббота короче будней (7ч), полная 9ч смена не влезает
+        lunch_hour = open_h + span // 2 if span >= MAX_WORK_TIME_BEFORE_LAUNCH else None
         end_h = open_h + span
         serving_all = tuple(h for h in range(open_h, end_h) if h != lunch_hour)
         paid_hours = len(serving_all)
@@ -61,8 +62,8 @@ def naive_schedule_week(employees: pd.DataFrame, n_windows_max: int, max_hours_w
         chosen = [e for e in ranked if max_hours_week - weekly_hours_used[e['employee_id']] >= paid_hours][:n_windows_max]
 
         assignments = []
-        for i, e in enumerate(chosen):
-            lh = open_h + 2 + (i % max(1, span - 3)) if span >= 6 else None  # лёгкий разброс обеда по очереди
+        for i, e in enumerate(chosen):  #что за х? v         v   откуда 1 и 3???
+            lh = open_h + MIN_WORK_TIME + (i % max(1, span - 3)) if span >= MAX_WORK_TIME_BEFORE_LAUNCH else None  # лёгкий разброс обеда по очереди
             serving = tuple(h for h in range(open_h, end_h) if h != lh) if lh is not None else serving_all
             weekly_hours_used[e['employee_id']] += len(serving)
             assignments.append(dict(employee_id=e['employee_id'], grade=e['grade'], start=open_h, end=end_h,
@@ -139,7 +140,7 @@ def week_summary(ca: pd.DataFrame, ops: pd.DataFrame, br: pd.DataFrame,
         out[pol] = dict(total_cost=total_cost, weighted_avg_wait=weighted_wait, total_shortfall=total_shortfall,
                          daily=daily[pol])
 
-    max_util = dict(naive=max(naive_hours.values()) / 40,
+    max_util = dict(naive=max(naive_hours.values()) / MAX_HOURS_WEEK,
                      greedy=greedy_summary['utilization'].max() if len(greedy_summary) else 0,
                      ilp=ilp_summary['utilization'].max() if len(ilp_summary) else 0)
     return out, max_util

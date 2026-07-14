@@ -20,8 +20,9 @@ from required_windows import required_windows_table, erlang_c_wait_minutes
 from schedule_greedy import schedule_day, generate_patterns
 from schedule_ilp import schedule_day_ilp_soft
 
+from config import WEEKDAY_HOURS, OPEN_HOUR, MAX_WORK_TIME
 
-def naive_schedule(employees: pd.DataFrame, n_windows_max: int, open_hour: int = 9,
+def naive_schedule(employees: pd.DataFrame, n_windows_max: int, open_hour: int = OPEN_HOUR,
                     lunch_start: int = 12):
     """
     Строит "наивное" расписание — имитацию текущего ручного процесса из
@@ -48,7 +49,7 @@ def naive_schedule(employees: pd.DataFrame, n_windows_max: int, open_hour: int =
     assignments = []
     for i, e in chosen.iterrows():
         lunch_hour = lunch_start + (i % 4)  # обед по очереди, максимум растягиваем на 4 часа
-        start, end = open_hour, open_hour + 9
+        start, end = open_hour, open_hour + MAX_WORK_TIME
         serving = tuple(h for h in range(start, end) if h != lunch_hour)
         assignments.append(dict(employee_id=e['employee_id'], grade=e['grade'], start=start, end=end,
                                  lunch_hour=lunch_hour, serving_hours=serving, paid_hours=len(serving),
@@ -132,8 +133,8 @@ if __name__ == '__main__':
     hours = list(req['hour'])
 
     a_naive = naive_schedule(branch_emp, n_win)
-    a_greedy, cov_greedy_df, unresolved, _ = schedule_day(branch_emp, req, 9, 19, n_windows_max=n_win)
-    a_ilp, cov_ilp_df, status, _, shortfall = schedule_day_ilp_soft(branch_emp, req, 9, 19, n_win)
+    a_greedy, cov_greedy_df, unresolved, _ = schedule_day(branch_emp, req, *WEEKDAY_HOURS[WEEKDAY_EN], n_windows_max=n_win)
+    a_ilp, cov_ilp_df, status, _, shortfall = schedule_day_ilp_soft(branch_emp, req, *WEEKDAY_HOURS[WEEKDAY_EN], n_win)
 
     cov_naive = coverage_from_assignments(a_naive, hours)
     cov_greedy = coverage_from_assignments(a_greedy, hours)

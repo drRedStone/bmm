@@ -1,0 +1,74 @@
+{
+  "BR01": {
+    "summary": {
+      "naive": {
+        "total_cost": 149100,
+        "weighted_avg_wait": 25.96028819767922,
+        "total_shortfall": 35
+      },
+      "greedy": {
+        "total_cost": 168700,
+        "weighted_avg_wait": 18.965882477610382,
+        "total_shortfall": 17
+      },
+      "ilp": {
+        "total_cost": 155650,
+        "weighted_avg_wait": 11.489290178435276,
+        "total_shortfall": 1
+      }
+    },
+    "max_util": {
+      "naive": 0.75,
+      "greedy": 1.0,
+      "ilp": 0.88
+    }
+  },
+  "BR02": {
+    "summary": {
+      "naive": {
+        "total_cost": 105900,
+        "weighted_avg_wait": 13.56483801573709,
+        "total_shortfall": 21
+      },
+      "greedy": {
+        "total_cost": 116800,
+        "weighted_avg_wait": 16.89831405592755,
+        "total_shortfall": 17
+      },
+      "ilp": {
+        "total_cost": 110900,
+        "weighted_avg_wait": 10.443894965471603,
+        "total_shortfall": 5
+      }
+    },
+    "max_util": {
+      "naive": 0.8,
+      "greedy": 1.0,
+      "ilp": 1.0
+    }
+  },
+  "BR03": {
+    "summary": {
+      "naive": {
+        "total_cost": 93900,
+        "weighted_avg_wait": 25.82368054548189,
+        "total_shortfall": 27
+      },
+      "greedy": {
+        "total_cost": 102400,
+        "weighted_avg_wait": 17.752420990205202,
+        "total_shortfall": 16
+      },
+      "ilp": {
+        "total_cost": 100000,
+        "weighted_avg_wait": 14.300112497844141,
+        "total_shortfall": 5
+      }
+    },
+    "max_util": {
+      "naive": 0.8,
+      "greedy": 1.0,
+      "ilp": 0.97
+    }
+  }
+}

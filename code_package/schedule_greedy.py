@@ -14,15 +14,9 @@ from dataclasses import dataclass, field
 from typing import Optional
 from required_windows import required_windows_table
 
+from config import MAX_WORK_TIME, MAX_WORK_TIME_BEFORE_LAUNCH, MIN_WORK_TIME, WEEKDAY_HOURS, MAX_HOURS_WEEK, MIN_TIME_BETWEEN_BREAK_AND_END
+
 SKILL_RANK = {'basic': 0, 'credit': 1, 'mortgage': 2}
-MAX_WORK_TIME_BEFORE_LAUNCH_BREAK_AND_KILL_HIMSELF = 4
-MAX_WORK_TIME = 9
-MIN_WORK_TIME = 2
-MIN_TIME_BETWEEN_BREAK_AND_END = 1
-MAX_HOURS_WEEK = 40
-
-
-
 
 @dataclass
 class Pattern:
@@ -41,7 +35,7 @@ class Pattern:
 
 
 def generate_patterns(open_hour: int, close_hour: int, max_span: int = MAX_WORK_TIME,
-                       min_span: int = MIN_WORK_TIME, lunch_required_from_span: int = MAX_WORK_TIME_BEFORE_LAUNCH_BREAK_AND_KILL_HIMSELF):
+                       min_span: int = MIN_WORK_TIME, lunch_required_from_span: int = MAX_WORK_TIME_BEFORE_LAUNCH):
     """Генерирует непересекающиеся по смыслу варианты смен для отделения с часами [open_hour, close_hour)."""
     patterns = []
     for start in range(open_hour, close_hour):
@@ -58,18 +52,7 @@ def generate_patterns(open_hour: int, close_hour: int, max_span: int = MAX_WORK_
                     patterns.append(Pattern(start, end, lunch_hour, serving))
             else:
                 patterns.append(Pattern(start, end, None, tuple(range(start, end))))
-    # убрать дубли по (start,end,lunch_hour)
     return patterns
-    # Бесполезно
-    """seen = set()
-    uniq = []
-    for p in patterns:
-        key = (p.start, p.end, p.lunch_hour)
-        if key not in seen:
-            seen.add(key)
-            uniq.append(p)
-    return uniq"""
-
 
 def schedule_day(employees: pd.DataFrame, req: pd.DataFrame, open_hour: int, close_hour: int,
                   n_windows_max: int, weekly_hours_used: dict = None,
@@ -178,13 +161,6 @@ def schedule_day(employees: pd.DataFrame, req: pd.DataFrame, open_hour: int, clo
     })
     return assignments, coverage_df, unresolved, weekly_hours_used
 
-
-WEEKDAY_HOURS = {  # (open_hour, close_hour) — из branches.csv: будни 09-19, суббота 09-16, воскресенье закрыто
-    'Monday': (9, 19), 'Tuesday': (9, 19), 'Wednesday': (9, 19),
-    'Thursday': (9, 19), 'Friday': (9, 19), 'Saturday': (9, 16),
-}
-
-
 def schedule_week(client_arrivals: pd.DataFrame, operations: pd.DataFrame, employees: pd.DataFrame,
                    branches: pd.DataFrame, branch_id: str):
     """
@@ -219,9 +195,9 @@ if __name__ == '__main__':
     emp = pd.read_csv('dataset/employees.csv')
     emp['skills'] = emp['skills'].str.split(',')
 
-    BRANCH, WEEKDAY_EN = 'BR01', 'Monday'
+    BRANCH, WEEKDAY_EN = 'BR01', 'Monday'  #да бл откуда берется эта хрень?
     n_win = int(br.loc[BRANCH, 'n_windows'])
-    open_h, close_h = 9, 19  # из hours_weekday «09:00-19:00»
+    open_h, close_h = WEEKDAY_HOURS[WEEKDAY_EN] # из hours_weekday «09:00-19:00»
 
     req = required_windows_table(ca, ops, BRANCH, WEEKDAY_EN, n_win)
     branch_emp = emp[emp['branch_id'] == BRANCH]

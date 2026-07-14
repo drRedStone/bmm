@@ -26,7 +26,8 @@ import pandas as pd
 import numpy as np
 from required_windows import required_windows_table
 
-WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+from config import WEEKDAYS
+
 
 
 def diagnose(ca: pd.DataFrame, ops: pd.DataFrame, br: pd.DataFrame,

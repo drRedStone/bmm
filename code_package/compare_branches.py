@@ -13,6 +13,8 @@ from schedule_greedy import schedule_day
 from schedule_ilp import schedule_day_ilp_soft
 from compare_policies import naive_schedule, coverage_from_assignments, avg_wait_for_coverage
 
+from config import WEEKDAY_HOURS
+
 WEEKDAY_EN = 'Monday'
 
 
@@ -44,8 +46,8 @@ def compare_branch(ca: pd.DataFrame, ops: pd.DataFrame, br: pd.DataFrame,
     hours = list(req['hour'])
 
     a_naive = naive_schedule(branch_emp, n_win)
-    a_greedy, cov_greedy_df, unresolved, _ = schedule_day(branch_emp, req, 9, 19, n_windows_max=n_win)
-    a_ilp, cov_ilp_df, status, _, shortfall = schedule_day_ilp_soft(branch_emp, req, 9, 19, n_win)
+    a_greedy, cov_greedy_df, unresolved, _ = schedule_day(branch_emp, req, *WEEKDAY_HOURS[WEEKDAY_EN], n_windows_max=n_win)
+    a_ilp, cov_ilp_df, status, _, shortfall = schedule_day_ilp_soft(branch_emp, req, *WEEKDAY_HOURS[WEEKDAY_EN], n_win)
 
     out = {}
     for name, assigns in [('naive', a_naive), ('greedy', a_greedy), ('ilp', a_ilp)]:
