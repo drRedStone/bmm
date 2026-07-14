@@ -10,6 +10,7 @@ __pycache__/
 *.so
 .Python
 *.egg-info/
+uv.lock
 
 # IDE
 .vscode/
