@@ -403,9 +403,11 @@ def plot_daily_schedule(assignments: list, title: str = "Расписание с
     ax.set_xlim(min_hour - 0.5, max_hour + 0.5)
     ax.set_xticks(range(min_hour, max_hour + 1))
     ax.grid(axis='x', linestyle='-', alpha=0.3)
-    legend_elements = [Patch(facecolor='tab:blue', label='Рабочее время'),
-                       Patch(facecolor='lightgray', hatch='//', label='Обед')]
-    ax.legend(handles=legend_elements, loc='upper right')
+    legend_elements = [
+    Patch(facecolor=color, label=str(grade)) 
+    for grade, color in GRADE_COLORS.items()
+    ] + [Patch(facecolor='lightgray', hatch='//', label='Обед')]
+    plt.legend(handles=legend_elements, bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.tight_layout()
     if save_path:
         plt.savefig(save_path, dpi=150)
