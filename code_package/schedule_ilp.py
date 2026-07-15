@@ -325,8 +325,11 @@ def schedule_day_ilp_soft(employees: pd.DataFrame, req: pd.DataFrame, open_hour:
     return assignments, coverage_df, 'optimal', new_weekly, shortfall_summary
 
 
-def schedule_week_ilp(client_arrivals: pd.DataFrame, operations: pd.DataFrame, employees: pd.DataFrame,
-                       branches: pd.DataFrame, branch_id: str):
+def schedule_week_ilp(client_arrivals: pd.DataFrame,
+                      operations: pd.DataFrame,
+                      employees: pd.DataFrame,
+                      branches: pd.DataFrame,
+                      branch_id: str):
     """
     ILP-аналог schedule_greedy.schedule_week: тот же перенос отработанных
     часов между днями недели (недельный лимит 40ч соблюдается сквозно), но
@@ -376,7 +379,7 @@ if __name__ == '__main__':
     emp = pd.read_csv('dataset/employees.csv')
     emp['skills'] = emp['skills'].str.split(',')
 
-    BRANCH, WEEKDAY_EN = 'BR01', 'Monday'
+    BRANCH, WEEKDAY_EN = 'BR01', 'Monday' # Это для таблицы сравнения графиков по отделниям на 1 день
     n_win = int(br.loc[BRANCH, 'n_windows'])
     req = required_windows_table(ca, ops, BRANCH, WEEKDAY_EN, n_win)
     branch_emp = emp[emp['branch_id'] == BRANCH]

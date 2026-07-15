@@ -126,7 +126,7 @@ if __name__ == '__main__':
     emp_raw = pd.read_csv('dataset/employees.csv')
     emp_raw['skills'] = emp_raw['skills'].str.split(',')
 
-    BRANCH, WEEKDAY_EN = 'BR01', 'Monday'
+    BRANCH, WEEKDAY_EN = 'BR01', 'Monday' # Это для таблицы сравнения графиков по отделниям на 1 день
     n_win = int(br.loc[BRANCH, 'n_windows'])
     req = required_windows_table(ca, ops, BRANCH, WEEKDAY_EN, n_win)
     branch_emp = emp_raw[emp_raw['branch_id'] == BRANCH].reset_index(drop=True)

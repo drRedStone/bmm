@@ -30,22 +30,27 @@ from config import WEEKDAYS
 
 
 
-def diagnose(ca: pd.DataFrame, ops: pd.DataFrame, br: pd.DataFrame,
-             branch_id: str = 'BR03', emp_raw: pd.DataFrame = None) -> pd.DataFrame:
+def diagnose(
+        client_arrivals: pd.DataFrame,
+        operations: pd.DataFrame,
+        branches: pd.DataFrame,
+        branch_id: str = 'BR03',
+        employees_raw: pd.DataFrame = None) -> pd.DataFrame:
+
     """
     Считает по всем часам недели предложенную нагрузку и загрузку при
     максимуме физически открытых окон отделения (Проблема 2 — не зависит
-    от штата), и печатает сводку. Если передан emp_raw — дополнительно
+    от штата), и печатает сводку. Если передан employees_raw — дополнительно
     считает РЕАЛЬНОЕ покрытие mortgage-спроса штатом за неделю через
     schedule_week_ilp (Проблема 1 — честный расчёт вместо предположений
     о составе персонала).
 
     Args:
-        ca: датафрейм client_arrivals.csv.
-        ops: датафрейм operations.csv.
-        br: датафрейм branches.csv, индексированный по branch_id.
+        client_arrivals: датафрейм client_arrivals.csv.
+        operations: датафрейм operations.csv.
+        branches: датафрейм branches.csv, индексированный по branch_id.
         branch_id: идентификатор отделения для диагностики.
-        emp_raw: (опционально) полный датафрейм employees.csv, skills уже
+        employees_raw: (опционально) полный датафрейм employees.csv, skills уже
             распарсены в list. Если передан — считается реальный процент
             покрытия mortgage-спроса штатом за неделю (Проблема 1). Если не
             передан — печатается только суммарный спрос без утверждений о
@@ -57,21 +62,27 @@ def diagnose(ca: pd.DataFrame, ops: pd.DataFrame, br: pd.DataFrame,
         lambda_mortgage, offered_load_a, rho_at_max_windows,
         threshold_reachable.
     """
-    n_win = int(br.loc[branch_id, 'n_windows'])
+    n_win = int(branches.loc[branch_id, 'n_windows']) # получим число окон в конкретном отделени
     rows = []
     for wd in WEEKDAYS:
-        req = required_windows_table(ca, ops, branch_id, wd, n_win)
+        req = required_windows_table(client_arrivals, operations, branch_id, wd, n_win)
         for _, r in req.iterrows():
             mu = 60 / r['avg_service_min'] if r['avg_service_min'] > 0 else np.nan
             a = r['lambda_total'] / mu                # предложенная нагрузка, Эрланг
             rho = r['lambda_total'] / (n_win * mu)     # загрузка при ВСЕХ физических окнах открытыми
-            rows.append(dict(weekday=wd, hour=int(r['hour']), lambda_total=r['lambda_total'],
-                              lambda_mortgage=r['lambda_mortgage'], offered_load_a=round(a, 2),
-                              rho_at_max_windows=round(rho, 2), threshold_reachable=r['threshold_reachable']))
+
+            rows.append(dict(weekday=wd,
+                             hour=int(r['hour']),
+                             lambda_total=r['lambda_total'],
+                             lambda_mortgage=r['lambda_mortgage'],
+                             offered_load_a=round(a, 2),  # на
+                             rho_at_max_windows=round(rho, 2), #
+                             threshold_reachable=r['threshold_reachable']))
+            
     diag = pd.DataFrame(rows)
 
-    n_unstable = (diag['rho_at_max_windows'] >= 1).sum()
-    n_unreachable = (~diag['threshold_reachable']).sum()
+    n_unstable = (diag['rho_at_max_windows'] >= 1).sum() # ЧТО ЭТО?
+    n_unreachable = (~diag['threshold_reachable']).sum() # ЧТО ЭТО?
     weekly_mortgage_demand = diag['lambda_mortgage'].sum()  # клиентов/неделю, требующих mortgage-навык
 
     print(f"=== {branch_id}: диагностика ===")
@@ -84,13 +95,13 @@ def diagnose(ca: pd.DataFrame, ops: pd.DataFrame, br: pd.DataFrame,
 
     print(f"\n--- Проблема 1: дефицит навыка (зависит от штата) ---")
     print(f"Суммарный поток mortgage-клиентов за неделю: {weekly_mortgage_demand:.1f} чел.")
-    if emp_raw is not None:
+    if employees_raw is not None:
         # честный расчёт реального покрытия — прогоняем ILP на всю неделю и
         # сравниваем достигнутое покрытие mortgage-окон с требуемым
         from schedule_ilp import schedule_week_ilp
-        branch_emp = emp_raw[emp_raw['branch_id'] == branch_id]
+        branch_emp = employees_raw[employees_raw['branch_id'] == branch_id]
         n_senior = int((branch_emp['grade'] == 'senior').sum())
-        results, _ = schedule_week_ilp(ca, ops, emp_raw, br, branch_id)
+        results, _ = schedule_week_ilp(client_arrivals, operations, employees_raw, branches, branch_id)
         total_r_mortgage = sum(r['coverage']['R_mortgage'].sum() for r in results.values())
         total_cov_mortgage = sum(r['coverage']['cov_mortgage'].sum() for r in results.values())
         pct = total_cov_mortgage / total_r_mortgage * 100 if total_r_mortgage > 0 else 100
@@ -98,15 +109,15 @@ def diagnose(ca: pd.DataFrame, ops: pd.DataFrame, br: pd.DataFrame,
         print(f"Требуется mortgage-окно-часов за неделю: {total_r_mortgage:.0f}, "
               f"покрывается (ILP-оптимум): {total_cov_mortgage:.0f} ({pct:.0f}%)")
     else:
-        print("(передайте emp_raw в diagnose(), чтобы посчитать реальный % покрытия штатом)")
+        print("(передайте employees_raw в diagnose(), чтобы посчитать реальный % покрытия штатом)")
 
     return diag
 
 
 if __name__ == '__main__':
-    ca = pd.read_csv('dataset/client_arrivals.csv')
-    ops = pd.read_csv('dataset/operations.csv')
-    br = pd.read_csv('dataset/branches.csv').set_index('branch_id')
+    client_arrivals = pd.read_csv('dataset/client_arrivals.csv')
+    operations = pd.read_csv('dataset/operations.csv')
+    branches = pd.read_csv('dataset/branches.csv').set_index('branch_id')
     emp = pd.read_csv('dataset/employees.csv')
     emp['skills'] = emp['skills'].str.split(',')
-    diagnose(ca, ops, br, 'BR03', emp_raw=emp)
+    diagnose(client_arrivals, operations, branches, 'BR03', employees_raw=emp)
