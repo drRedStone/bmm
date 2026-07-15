@@ -28,16 +28,14 @@ from required_windows import required_windows_table, erlang_c_wait_minutes
 from schedule_greedy import schedule_day, generate_patterns, schedule_week
 from schedule_ilp import schedule_day_ilp_soft, schedule_week_ilp
 
-from config import WEEKDAY_HOURS, OPEN_HOUR, MAX_WORK_TIME, MAX_HOURS_WEEK
+from config import WEEKDAY_HOURS, OPEN_HOUR, MAX_WORK_TIME, MAX_HOURS_WEEK, REPORT_SAVE_DIRECTORY, GRADE_COLORS
 
-REPORT_SAVE_DIRECTORY = Path(__file__).parent.parent / 'report'
+
 if __name__ == '__main__':
     if os.path.exists(REPORT_SAVE_DIRECTORY) and not os.path.isdir(REPORT_SAVE_DIRECTORY):
         raise Error('failed to create save dir')
     elif not os.path.exists(REPORT_SAVE_DIRECTORY):
         os.mkdir(REPORT_SAVE_DIRECTORY)
-
-GRADE_COLORS = {'junior': 'limegreen', 'middle': 'orange', 'senior': 'tomato'}
 
 
 def naive_schedule(employees: pd.DataFrame, n_windows_max: int, open_hour: int = OPEN_HOUR,
