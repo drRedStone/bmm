@@ -1,0 +1,429 @@
+{
+  "total_cost": 116800.0,
+  "avg_wait_weighted": 16.9,
+  "total_shortfall": 17,
+  "daily": [
+    {
+      "weekday": "Monday",
+      "cost": 21800.0,
+      "avg_wait": 23.71,
+      "shortfall": 4,
+      "hourly": [
+        {
+          "hour": 9,
+          "R_total": 4,
+          "cov_total": 3,
+          "wait_min": 90.0
+        },
+        {
+          "hour": 10,
+          "R_total": 4,
+          "cov_total": 4,
+          "wait_min": 14.46
+        },
+        {
+          "hour": 11,
+          "R_total": 4,
+          "cov_total": 3,
+          "wait_min": 24.72
+        },
+        {
+          "hour": 12,
+          "R_total": 4,
+          "cov_total": 4,
+          "wait_min": 2.03
+        },
+        {
+          "hour": 13,
+          "R_total": 3,
+          "cov_total": 3,
+          "wait_min": 5.84
+        },
+        {
+          "hour": 14,
+          "R_total": 3,
+          "cov_total": 4,
+          "wait_min": 0.77
+        },
+        {
+          "hour": 15,
+          "R_total": 3,
+          "cov_total": 4,
+          "wait_min": 0.93
+        },
+        {
+          "hour": 16,
+          "R_total": 4,
+          "cov_total": 4,
+          "wait_min": 9.27
+        },
+        {
+          "hour": 17,
+          "R_total": 4,
+          "cov_total": 4,
+          "wait_min": 9.42
+        },
+        {
+          "hour": 18,
+          "R_total": 3,
+          "cov_total": 1,
+          "wait_min": 90.0
+        }
+      ]
+    },
+    {
+      "weekday": "Tuesday",
+      "cost": 21500.0,
+      "avg_wait": 22.05,
+      "shortfall": 4,
+      "hourly": [
+        {
+          "hour": 9,
+          "R_total": 4,
+          "cov_total": 3,
+          "wait_min": 90.0
+        },
+        {
+          "hour": 10,
+          "R_total": 4,
+          "cov_total": 4,
+          "wait_min": 3.62
+        },
+        {
+          "hour": 11,
+          "R_total": 2,
+          "cov_total": 3,
+          "wait_min": 1.32
+        },
+        {
+          "hour": 12,
+          "R_total": 4,
+          "cov_total": 4,
+          "wait_min": 2.17
+        },
+        {
+          "hour": 13,
+          "R_total": 3,
+          "cov_total": 3,
+          "wait_min": 4.8
+        },
+        {
+          "hour": 14,
+          "R_total": 2,
+          "cov_total": 4,
+          "wait_min": 0.03
+        },
+        {
+          "hour": 15,
+          "R_total": 3,
+          "cov_total": 4,
+          "wait_min": 0.47
+        },
+        {
+          "hour": 16,
+          "R_total": 3,
+          "cov_total": 4,
+          "wait_min": 0.89
+        },
+        {
+          "hour": 17,
+          "R_total": 4,
+          "cov_total": 4,
+          "wait_min": 5.5
+        },
+        {
+          "hour": 18,
+          "R_total": 4,
+          "cov_total": 1,
+          "wait_min": 90.0
+        }
+      ]
+    },
+    {
+      "weekday": "Wednesday",
+      "cost": 21800.0,
+      "avg_wait": 9.01,
+      "shortfall": 2,
+      "hourly": [
+        {
+          "hour": 9,
+          "R_total": 4,
+          "cov_total": 3,
+          "wait_min": 17.24
+        },
+        {
+          "hour": 10,
+          "R_total": 4,
+          "cov_total": 4,
+          "wait_min": 7.21
+        },
+        {
+          "hour": 11,
+          "R_total": 4,
+          "cov_total": 4,
+          "wait_min": 3.69
+        },
+        {
+          "hour": 12,
+          "R_total": 3,
+          "cov_total": 3,
+          "wait_min": 5.42
+        },
+        {
+          "hour": 13,
+          "R_total": 3,
+          "cov_total": 3,
+          "wait_min": 10.02
+        },
+        {
+          "hour": 14,
+          "R_total": 2,
+          "cov_total": 3,
+          "wait_min": 0.23
+        },
+        {
+          "hour": 15,
+          "R_total": 3,
+          "cov_total": 4,
+          "wait_min": 1.78
+        },
+        {
+          "hour": 16,
+          "R_total": 3,
+          "cov_total": 4,
+          "wait_min": 0.93
+        },
+        {
+          "hour": 17,
+          "R_total": 3,
+          "cov_total": 4,
+          "wait_min": 0.99
+        },
+        {
+          "hour": 18,
+          "R_total": 3,
+          "cov_total": 2,
+          "wait_min": 42.07
+        }
+      ]
+    },
+    {
+      "weekday": "Thursday",
+      "cost": 21800.0,
+      "avg_wait": 8.87,
+      "shortfall": 1,
+      "hourly": [
+        {
+          "hour": 9,
+          "R_total": 4,
+          "cov_total": 3,
+          "wait_min": 38.95
+        },
+        {
+          "hour": 10,
+          "R_total": 4,
+          "cov_total": 4,
+          "wait_min": 10.6
+        },
+        {
+          "hour": 11,
+          "R_total": 3,
+          "cov_total": 3,
+          "wait_min": 6.72
+        },
+        {
+          "hour": 12,
+          "R_total": 3,
+          "cov_total": 3,
+          "wait_min": 1.57
+        },
+        {
+          "hour": 13,
+          "R_total": 4,
+          "cov_total": 4,
+          "wait_min": 3.72
+        },
+        {
+          "hour": 14,
+          "R_total": 3,
+          "cov_total": 3,
+          "wait_min": 1.75
+        },
+        {
+          "hour": 15,
+          "R_total": 3,
+          "cov_total": 4,
+          "wait_min": 0.79
+        },
+        {
+          "hour": 16,
+          "R_total": 3,
+          "cov_total": 4,
+          "wait_min": 1.46
+        },
+        {
+          "hour": 17,
+          "R_total": 3,
+          "cov_total": 4,
+          "wait_min": 0.26
+        },
+        {
+          "hour": 18,
+          "R_total": 2,
+          "cov_total": 2,
+          "wait_min": 4.55
+        }
+      ]
+    },
+    {
+      "weekday": "Friday",
+      "cost": 21800.0,
+      "avg_wait": 12.15,
+      "shortfall": 2,
+      "hourly": [
+        {
+          "hour": 9,
+          "R_total": 4,
+          "cov_total": 3,
+          "wait_min": 14.69
+        },
+        {
+          "hour": 10,
+          "R_total": 3,
+          "cov_total": 4,
+          "wait_min": 1.18
+        },
+        {
+          "hour": 11,
+          "R_total": 4,
+          "cov_total": 4,
+          "wait_min": 5.0
+        },
+        {
+          "hour": 12,
+          "R_total": 3,
+          "cov_total": 3,
+          "wait_min": 6.68
+        },
+        {
+          "hour": 13,
+          "R_total": 3,
+          "cov_total": 3,
+          "wait_min": 1.42
+        },
+        {
+          "hour": 14,
+          "R_total": 3,
+          "cov_total": 3,
+          "wait_min": 4.25
+        },
+        {
+          "hour": 15,
+          "R_total": 3,
+          "cov_total": 4,
+          "wait_min": 0.88
+        },
+        {
+          "hour": 16,
+          "R_total": 4,
+          "cov_total": 4,
+          "wait_min": 3.16
+        },
+        {
+          "hour": 17,
+          "R_total": 3,
+          "cov_total": 4,
+          "wait_min": 0.99
+        },
+        {
+          "hour": 18,
+          "R_total": 3,
+          "cov_total": 2,
+          "wait_min": 90.0
+        }
+      ]
+    },
+    {
+      "weekday": "Saturday",
+      "cost": 8100.0,
+      "avg_wait": 30.55,
+      "shortfall": 4,
+      "hourly": [
+        {
+          "hour": 9,
+          "R_total": 4,
+          "cov_total": 3,
+          "wait_min": 22.21
+        },
+        {
+          "hour": 10,
+          "R_total": 3,
+          "cov_total": 3,
+          "wait_min": 4.9
+        },
+        {
+          "hour": 11,
+          "R_total": 3,
+          "cov_total": 1,
+          "wait_min": 90.0
+        },
+        {
+          "hour": 12,
+          "R_total": 3,
+          "cov_total": 2,
+          "wait_min": 90.0
+        },
+        {
+          "hour": 13,
+          "R_total": 3,
+          "cov_total": 3,
+          "wait_min": 7.38
+        },
+        {
+          "hour": 14,
+          "R_total": 3,
+          "cov_total": 3,
+          "wait_min": 6.07
+        },
+        {
+          "hour": 15,
+          "R_total": 3,
+          "cov_total": 3,
+          "wait_min": 4.53
+        }
+      ]
+    }
+  ],
+  "employees": [
+    {
+      "employee_id": "BR02-E01",
+      "hours": 40,
+      "utilization": 1.0
+    },
+    {
+      "employee_id": "BR02-E04",
+      "hours": 40,
+      "utilization": 1.0
+    },
+    {
+      "employee_id": "BR02-E05",
+      "hours": 40,
+      "utilization": 1.0
+    },
+    {
+      "employee_id": "BR02-E02",
+      "hours": 40,
+      "utilization": 1.0
+    },
+    {
+      "employee_id": "BR02-E03",
+      "hours": 20,
+      "utilization": 0.5
+    },
+    {
+      "employee_id": "BR02-E06",
+      "hours": 8,
+      "utilization": 0.2
+    }
+  ]
+}

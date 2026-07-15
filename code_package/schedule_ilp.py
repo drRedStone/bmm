@@ -30,8 +30,8 @@ import numpy as np
 from scipy.optimize import milp, LinearConstraint, Bounds
 from schedule_greedy import generate_patterns, Pattern
 from required_windows import required_windows_table
-
 from config import WEEKDAY_HOURS, MAX_HOURS_WEEK
+
 
 def schedule_day_ilp(employees: pd.DataFrame, req: pd.DataFrame, open_hour: int, close_hour: int,
                       n_windows_max: int, max_hours_week: int = MAX_HOURS_WEEK, weekly_hours_used: dict = None):
@@ -369,6 +369,8 @@ def schedule_week_ilp(client_arrivals: pd.DataFrame, operations: pd.DataFrame, e
 
 if __name__ == '__main__':
     from schedule_greedy import schedule_day
+    from compare_policies import coverage_from_assignments, avg_wait_for_coverage
+    import numpy as np
 
     ca = pd.read_csv('dataset/client_arrivals.csv')
     ops = pd.read_csv('dataset/operations.csv')
@@ -394,10 +396,38 @@ if __name__ == '__main__':
     print(f"Сотрудников: {len(assignments_ilp)}, ФОТ за день: {sched_ilp['shift_cost'].sum():.0f} руб.")
 
     print("\n=== ЖАДНЫЙ (для сравнения) ===")
-    assignments_greedy, coverage_greedy, unresolved, _ = schedule_day(branch_emp, req, *WEEKDAY_HOURS[WEEKDAY_EN], n_windows_max=n_win)
+    assignments_greedy, coverage_greedy, unresolved, _ = schedule_day(
+        branch_emp, req, *WEEKDAY_HOURS[WEEKDAY_EN], n_windows_max=n_win
+    )
     sched_greedy = pd.DataFrame(assignments_greedy)
+
+    hours_list = list(req['hour'])
+    cov_greedy = coverage_from_assignments(assignments_greedy, hours_list)
+    waits_greedy, weights_greedy = avg_wait_for_coverage(req, cov_greedy)
+    avg_wait_greedy = np.average(waits_greedy, weights=weights_greedy)
+
     print(f"Сотрудников: {len(assignments_greedy)}, ФОТ за день: {sched_greedy['shift_cost'].sum():.0f} руб.")
+    print("\n--- Ожидание клиентов (жадный) ---")
+    print(f"Средневзвешенное ожидание за день: {avg_wait_greedy:.1f} минут")
+    print("По часам (минут):")
+    for h, w in zip(hours_list, waits_greedy):
+        print(f"  {h:02d}:00  {w:.1f} мин")
+
     greedy_shortfall_total = (coverage_greedy['R_total'] - coverage_greedy['cov_total']).clip(lower=0).sum()
-    print(f"Недобор total-окно-часов (жадный): {greedy_shortfall_total}")
     ilp_shortfall_total = (coverage_ilp['R_total'] - coverage_ilp['cov_total']).clip(lower=0).sum()
+    print(f"Недобор total-окно-часов (жадный): {greedy_shortfall_total}")
     print(f"Недобор total-окно-часов (ILP): {ilp_shortfall_total}")
+
+    cov_ilp = coverage_from_assignments(assignments_ilp, hours_list)
+    waits_ilp, weights_ilp = avg_wait_for_coverage(req, cov_ilp)
+    avg_wait_ilp = np.average(waits_ilp, weights=weights_ilp)
+
+    print("\n--- Ожидание клиентов (ILP) ---")
+    print(f"Средневзвешенное ожидание за день: {avg_wait_ilp:.1f} минут")
+    print("По часам (минут):")
+    for h, w in zip(hours_list, waits_ilp):
+        print(f"  {h:02d}:00  {w:.1f} мин")
+
+    print("\n=== Сравнение ILP vs Жадный ===")
+    print(f"ILP   : среднее ожидание {avg_wait_ilp:.1f} мин, ФОТ {sched_ilp['shift_cost'].sum():.0f} руб.")
+    print(f"Жадный: среднее ожидание {avg_wait_greedy:.1f} мин, ФОТ {sched_greedy['shift_cost'].sum():.0f} руб.")
