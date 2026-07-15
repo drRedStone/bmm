@@ -1,0 +1,1 @@
+1) Add compare_policies variables into config.py
