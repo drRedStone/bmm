@@ -13,3 +13,6 @@ WERGES = {"junior": 350, "middle": 500, "senior": 700}
 SKILLS = {"junior": "basic", "middle": "basic,credit", "senior": "basic,credit,mortgage"}
 
 OPEN_HOUR = 9 # чекать, где используется и менять на обращение к словарю
+
+REPORT_SAVE_DIRECTORY = Path(__file__).parent.parent / 'report'
+GRADE_COLORS = {'junior': 'limegreen', 'middle': 'orange', 'senior': 'tomato'}
