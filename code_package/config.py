@@ -13,7 +13,11 @@ WEEKDAY_HOURS = {  # (open_hour, close_hour) — из branches.csv: будни 0
 }
 
 WERGES = {"junior": 350, "middle": 500, "senior": 700}
-SKILLS = {"junior": "basic", "middle": "basic,credit", "senior": "basic,credit,mortgage"}
+SKILLS = {
+    "junior": ["basic"],
+    "middle": ["basic", "credit"],
+    "senior": ["basic", "credit", "mortgage"]
+}
 
 OPEN_HOUR = 9 # чекать, где используется и менять на обращение к словарю
 

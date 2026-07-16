@@ -20,7 +20,7 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 import os
-from typing import Optional
+from typing import Dict, List, Optional, Tuple
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 
@@ -39,7 +39,7 @@ if __name__ == '__main__':
 
 
 def naive_schedule(employees: pd.DataFrame, n_windows_max: int, open_hour: int = OPEN_HOUR,
-                    lunch_start: int = 12):
+                    lunch_start: int = 12) -> List[Dict]:
     """
     Строит "наивное" расписание — имитацию текущего ручного процесса из
     брифа ("все выходят на 9:00, обед по очереди"): берутся первые
@@ -73,7 +73,7 @@ def naive_schedule(employees: pd.DataFrame, n_windows_max: int, open_hour: int =
     return assignments
 
 
-def coverage_from_assignments(assignments: list, hours: list) -> dict:
+def coverage_from_assignments(assignments: List, hours: List[int]) -> Dict[int, int]:
     """
     Считает фактическое число открытых окон по часам для заданного списка
     назначений смен — сколько сотрудников реально обслуживают окно в каждый
@@ -97,7 +97,7 @@ def coverage_from_assignments(assignments: list, hours: list) -> dict:
     return cov
 
 
-def avg_wait_for_coverage(req: pd.DataFrame, cov: dict, cap_minutes: float = 90.0):
+def avg_wait_for_coverage(req: pd.DataFrame, cov: dict, cap_minutes: float = 90.0) -> Tuple[np.ndarray, np.ndarray]:
     """
     Переводит фактическое почасовое покрытие (число открытых окон) в
     реальное среднее время ожидания через формулу Эрланга C — это и есть
@@ -353,7 +353,7 @@ def weekly_schedule_to_json(
     }
 
 
-def plot_daily_schedule(assignments: list, title: str = "Расписание смен", save_path: Optional[str] = None):
+def plot_daily_schedule(assignments: List[Dict], title: str = "Расписание смен", save_path: Optional[str] = None) -> None:
     """Гант-диаграмма смен на один день.
 
     Args:
@@ -509,7 +509,7 @@ def main2():
 # ----------------------------------------------------------------------
 # Основная функция генерации всех отчётов
 # ----------------------------------------------------------------------
-def generate_all_reports():
+def generate_all_reports() -> None:
     """
     Генерирует для каждого отделения и каждого рабочего дня:
       - гант-диаграммы расписаний (ILP и Greedy)

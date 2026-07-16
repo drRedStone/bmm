@@ -12,8 +12,7 @@ Args/Returns, у нетривиальных мест внутри функций
 5. `compare_policies.py` — сравнение naive/greedy/ILP на одном дне/отделении
 6. `compare_branches.py` — то же самое по всем трём отделениям
 7. `week_pipeline.py` — масштабирование сравнения на всю неделю
-8. `br03_deep_dive.py` — диагностика структурных/физических ограничений BR03 (учитывает реальный состав сотрудников)
-9. `estimate_lambda.py` — отдельный скрипт-утилита для оценки λ с выгрузкой в CSV
+8. `estimate_lambda.py` — отдельный скрипт-утилита для оценки λ с выгрузкой в CSV
 
 Все файлы ожидают датасет в подпапке `dataset/` (client_arrivals.csv, operations.csv,
 employees.csv, branches.csv, hourly_load.csv) рядом с собой.

@@ -25,6 +25,8 @@ required_windows.py
 Независимая проверка модели очереди — дискретно-событийная симуляция в
 queue_simulation.py (сравнение с erlang_c_wait_minutes ниже).
 """
+from typing import Tuple
+
 import pandas as pd
 import numpy as np
 import math
@@ -232,7 +234,21 @@ def required_windows_table(client_arrivals: pd.DataFrame, operations: pd.DataFra
 
 
 
-def recommend_windows(client_arrivals, operations, branch_id, weekday_en):
+def recommend_windows(client_arrivals: pd.DataFrame, operations: pd.DataFrame, branch_id: str, weekday_en: str) -> Tuple[int, int, int]:
+    """
+    Рекомендует количество окон для нового отделения (без учёта физических
+    ограничений). Печатает и возвращает максимальные значения R_total,
+    R_credit, R_mortgage за день.
+
+    Args:
+        client_arrivals: DataFrame client_arrivals.csv.
+        operations: DataFrame operations.csv.
+        branch_id: идентификатор отделения.
+        weekday_en: день недели на английском ('Monday').
+
+    Returns:
+        Кортеж (max_total, max_credit, max_mortgage).
+    """
     df = required_windows_unconstrained(client_arrivals, operations, branch_id, weekday_en)
     max_total = df['R_total'].max()
     max_credit = df['R_credit'].max()
@@ -240,21 +256,25 @@ def recommend_windows(client_arrivals, operations, branch_id, weekday_en):
     print(f"Рекомендуемое общее число окон: {max_total}")
     print(f"Из них credit+: {max_credit}, mortgage: {max_mortgage}")
     return max_total, max_credit, max_mortgage
-def required_windows_unconstrained(client_arrivals, operations, branch_id, weekday_en):
+def required_windows_unconstrained(client_arrivals: pd.DataFrame, operations: pd.DataFrame, branch_id: str, weekday_en: str) -> pd.DataFrame:
     """
+    Вычисляет требуемое количество окон по часам без ограничения физическим
+    максимумом (как если бы отделение строилось с нуля).
+
+    Аналогична required_windows_table, но n_windows_max не используется,
+    поэтому R_total может превышать любое фиксированное число окон.
+
     Args:
-        client_arrivals: датафрейм client_arrivals.csv (или эквивалент) со
-            столбцами arrival_datetime, branch_id, operation_id,
-            service_time_min.
-        operations: датафрейм operations.csv со столбцами operation_id,
+        client_arrivals: DataFrame client_arrivals.csv со столбцами
+            arrival_datetime, branch_id, operation_id, service_time_min.
+        operations: DataFrame operations.csv со столбцами operation_id,
             required_skill.
-        branch_id: идентификатор отделения (например, 'BR01').
-        weekday_en: день недели на английском в формате pandas.day_name()
-            (например, 'Monday').
+        branch_id: идентификатор отделения ('BR01' и т.д.).
+        weekday_en: день недели на английском ('Monday' и т.д.).
 
     Returns:
-        DataFrame, отсортированный по часу, со столбцами: hour, lambda_total,
-        lambda_credit, lambda_mortgage, avg_service_min, R_total, R_credit,
+        DataFrame с колонками: hour, lambda_total, lambda_credit,
+        lambda_mortgage, avg_service_min, R_total, R_credit,
         R_mortgage, Wq_at_cap_min, threshold_reachable.
     """
     ops = operations.set_index('operation_id')['required_skill']
