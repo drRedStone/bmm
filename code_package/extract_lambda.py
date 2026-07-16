@@ -1,13 +1,16 @@
+from pathlib import Path
+
 import pandas as pd
 import matplotlib
+from config import WEEKDAYS
 matplotlib.use('Agg')  # Чтобы работало без дисплея (headless)
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-path = "/home/you/bmm/"
+path = Path(__file__).parent.parent
 
 # Загружаем данные
-clients = pd.read_csv(path + 'dataset/client_arrivals.csv')
+clients = pd.read_csv(path / 'dataset/client_arrivals.csv')
 
 # Превращаем строку с датой в нормальный datetime
 clients['arrival_datetime'] = pd.to_datetime(clients['arrival_datetime'])
@@ -21,7 +24,7 @@ hourly_load = clients.groupby(['weekday', 'hour', 'operation_id', 'branch_id']).
 
 hourly_load['av_lambda'] = hourly_load['lambda_count']/4
 # Сохраняем в CSV — это ваш параметр λ(t)
-hourly_load.to_csv(path+'heatmaps/lambda_parameters.csv', index=False)
+hourly_load.to_csv(path / 'heatmaps/lambda_parameters.csv', index=False)
 print("Параметр λ(t) сохранён в heatmaps/lambda_parameters.csv")
 print(hourly_load)
 
@@ -32,8 +35,7 @@ for branch in ('BR01', 'BR02', 'BR03'):
             # Строим heatmap и сохраняем в PNG
             pivot = hourly_load[(hourly_load['branch_id'] == branch) & (hourly_load['operation_id'] == op)].pivot(index='weekday', columns='hour', values=val)
             # Упорядочиваем дни недели
-            day_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
-            pivot = pivot.reindex(day_order)
+            pivot = pivot.reindex(WEEKDAYS)
 
             plt.figure(figsize=(12, 6))
             sns.heatmap(pivot, cmap='YlOrRd', annot=True, fmt='.0f')
@@ -41,6 +43,25 @@ for branch in ('BR01', 'BR02', 'BR03'):
             plt.xlabel('Час дня')
             plt.ylabel('День недели')
             plt.tight_layout()
-            plt.savefig(path + f'heatmaps/heatmap_{branch}_{op}_{val}.png', dpi=150)
+            plt.savefig(path / f'heatmaps/heatmap_{branch}_{op}_{val}.png', dpi=150)
             plt.close()
             print(f"Heatmap_{branch}_{op}_{val} сохранён")
+for branch in ('BR01', 'BR02', 'BR03'):
+    for val in ('lambda_count', 'av_lambda'):
+        # Строим heatmap и сохраняем в PNG
+        aggregated = (hourly_load[hourly_load['branch_id'] == branch] \
+            .groupby(['weekday', 'hour'], as_index=False)[val] \
+            .sum())
+        pivot = aggregated.pivot(index='weekday', columns='hour', values=val)
+        # Упорядочиваем дни недели
+        pivot = pivot.reindex(WEEKDAYS)
+
+        plt.figure(figsize=(12, 6))
+        sns.heatmap(pivot, cmap='YlOrRd', annot=True, fmt='.0f')
+        plt.title(f'Интенсивность потока операций в отделении {branch}')
+        plt.xlabel('Час дня')
+        plt.ylabel('День недели')
+        plt.tight_layout()
+        plt.savefig(path / f'heatmaps/heatmap_{branch}_{val}.png', dpi=150)
+        plt.close()
+        print(f"Heatmap_{branch}_{val} сохранён")

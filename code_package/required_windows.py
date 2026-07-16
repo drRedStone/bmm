@@ -113,7 +113,7 @@ def min_windows_erlang(lam_per_hour: float, avg_service_min: float,
 
 
 def min_skill_servers(lam_skill_per_hour: float, avg_service_min: float,
-                       safety_buffer: int = 1, safety_trashold: float = 0.3) -> int:
+                    safety_buffer: int = 1, safety_trashold: float = 0.3) -> int:
     """
     Оценивает минимальное число серверов конкретной квалификации (credit
     или mortgage), необходимое для под-потока клиентов этого типа.
@@ -153,15 +153,15 @@ def required_windows_table(client_arrivals: pd.DataFrame, operations: pd.DataFra
     расписания (schedule_greedy.schedule_day, schedule_ilp.schedule_day_ilp*).
 
     Для каждого часа считает:
-      - lambda_total / lambda_credit / lambda_mortgage — интенсивность
+    - lambda_total / lambda_credit / lambda_mortgage — интенсивность
         общего потока и под-потоков, требующих credit+ и mortgage-навык
         соответственно (credit+ включает mortgage — вложенность навыков
         senior ⊃ credit ⊃ basic из employees.csv).
-      - R_total / R_credit / R_mortgage — минимальное число окон каждой
+    - R_total / R_credit / R_mortgage — минимальное число окон каждой
         категории, с гарантией вложенности R_mortgage <= R_credit <= R_total
         и жёстким потолком R_total <= n_windows_max (физическое число окон
         отделения из branches.csv).
-      - Wq_at_cap_min / threshold_reachable — реальное ожидание и флаг
+    - Wq_at_cap_min / threshold_reachable — реальное ожидание и флаг
         достижимости порога THRESHOLD_MIN, если открыть ВСЕ физически
         доступные окна. False означает инфраструктурное ограничение
         (не хватает окон), которое никаким расписанием не решить.
@@ -220,14 +220,90 @@ def required_windows_table(client_arrivals: pd.DataFrame, operations: pd.DataFra
         # (а не просто "порог не достигнут", а "насколько именно не достигнут")
         mu_total = 60.0 / avg_service if avg_service > 0 else np.nan
         wq_at_cap = (erlang_c_wait_minutes(lam_total, mu_total, r_total_capped)
-                     if lam_total > 0 else 0.0)
+                    if lam_total > 0 else 0.0)
         reachable = wq_at_cap <= THRESHOLD_MIN
 
         rows.append(dict(hour=hour, lambda_total=round(lam_total, 2), lambda_credit=round(lam_credit, 2),
-                          lambda_mortgage=round(lam_mortgage, 2), avg_service_min=round(avg_service, 1),
-                          R_total=r_total_capped, R_credit=r_credit, R_mortgage=r_mortgage,
-                          Wq_at_cap_min=round(wq_at_cap, 1), threshold_reachable=reachable))
+                        lambda_mortgage=round(lam_mortgage, 2), avg_service_min=round(avg_service, 1),
+                        R_total=r_total_capped, R_credit=r_credit, R_mortgage=r_mortgage,
+                        Wq_at_cap_min=round(wq_at_cap, 1), threshold_reachable=reachable))
     return pd.DataFrame(rows).sort_values('hour').reset_index(drop=True)
+
+
+
+
+def recommend_windows(client_arrivals, operations, branch_id, weekday_en):
+    df = required_windows_unconstrained(client_arrivals, operations, branch_id, weekday_en)
+    max_total = df['R_total'].max()
+    max_credit = df['R_credit'].max()
+    max_mortgage = df['R_mortgage'].max()
+    print(f"Рекомендуемое общее число окон: {max_total}")
+    print(f"Из них credit+: {max_credit}, mortgage: {max_mortgage}")
+    return max_total, max_credit, max_mortgage
+def required_windows_unconstrained(client_arrivals, operations, branch_id, weekday_en):
+    """
+    Args:
+        client_arrivals: датафрейм client_arrivals.csv (или эквивалент) со
+            столбцами arrival_datetime, branch_id, operation_id,
+            service_time_min.
+        operations: датафрейм operations.csv со столбцами operation_id,
+            required_skill.
+        branch_id: идентификатор отделения (например, 'BR01').
+        weekday_en: день недели на английском в формате pandas.day_name()
+            (например, 'Monday').
+
+    Returns:
+        DataFrame, отсортированный по часу, со столбцами: hour, lambda_total,
+        lambda_credit, lambda_mortgage, avg_service_min, R_total, R_credit,
+        R_mortgage, Wq_at_cap_min, threshold_reachable.
+    """
+    ops = operations.set_index('operation_id')['required_skill']
+    ca = client_arrivals.copy()
+    ca['arrival_datetime'] = pd.to_datetime(ca['arrival_datetime'])
+    ca['weekday_en'] = ca['arrival_datetime'].dt.day_name()
+    ca['hour'] = ca['arrival_datetime'].dt.hour
+    ca['skill'] = ca['operation_id'].map(ops)
+
+    sub = ca[(ca['branch_id'] == branch_id) & (ca['weekday_en'] == weekday_en)]
+    n_weeks = sub['arrival_datetime'].dt.date.nunique()  # число наблюдаемых недель для усреднения (MLE лямбды)
+
+    rows = []
+    for hour, g in sub.groupby('hour'):
+        lam_total = len(g) / n_weeks
+        # credit+ включает mortgage: senior может делать всё, что и middle (вложенность навыков)
+        lam_credit = len(g[g['skill'].isin(['credit', 'mortgage'])]) / n_weeks
+        lam_mortgage = len(g[g['skill'] == 'mortgage']) / n_weeks
+        # эффективное среднее время обслуживания В ЭТОТ КОНКРЕТНЫЙ час (наблюдаемое
+        # по факту, а не общее среднее по отделению) — учитывает, что микс типов
+        # операций может отличаться по часам (например, больше кредитных консультаций
+        # в обед, когда у людей есть время)
+        avg_service = g['service_time_min'].mean()
+
+        r_total = min_windows_erlang(lam_total, avg_service)
+        r_credit = min_skill_servers(lam_credit, SERVICE_MIN['credit'])
+        r_mortgage = min_skill_servers(lam_mortgage, SERVICE_MIN['mortgage'])
+
+        # физический потолок окон в отделении — жёсткое ограничение сверху
+        r_total_capped = r_total
+        # гарантируем вложенность: под-требования не могут превышать общее
+        r_credit = min(r_credit, r_total_capped)
+        r_mortgage = min(r_mortgage, r_credit)
+
+        # если даже на физическом максимуме окон порог недостижим — считаем
+        # реальный Wq на этом максимуме, чтобы явно показать масштаб проблемы
+        # (а не просто "порог не достигнут", а "насколько именно не достигнут")
+        mu_total = 60.0 / avg_service if avg_service > 0 else np.nan
+        wq_at_cap = (erlang_c_wait_minutes(lam_total, mu_total, r_total_capped)
+                    if lam_total > 0 else 0.0)
+        reachable = wq_at_cap <= THRESHOLD_MIN
+
+        rows.append(dict(hour=hour, lambda_total=round(lam_total, 2), lambda_credit=round(lam_credit, 2),
+                        lambda_mortgage=round(lam_mortgage, 2), avg_service_min=round(avg_service, 1),
+                        R_total=r_total_capped, R_credit=r_credit, R_mortgage=r_mortgage,
+                        Wq_at_cap_min=round(wq_at_cap, 1), threshold_reachable=reachable))
+    return pd.DataFrame(rows).sort_values('hour').reset_index(drop=True)
+
+
 
 
 if __name__ == '__main__':
@@ -241,3 +317,11 @@ if __name__ == '__main__':
         t = required_windows_table(ca, ops, bid, 'Monday', n_win)
         print(f"\n=== {bid} ({br.loc[bid,'name']}), окон физически: {n_win}, понедельник ===")
         print(t.to_string(index=False))
+    for bid in ['BR01', 'BR02', 'BR03']:
+        t = required_windows_unconstrained(ca, ops, bid, 'Monday')
+        print(f"\n=== {bid} ({br.loc[bid,'name']}), понедельник ===")
+        print(t.to_string(index=False))
+        max_total, max_credit, max_mortgage = recommend_windows(ca, ops, bid, 'Monday')
+        print(f"Рекомендуемое общее число окон: {max_total}")
+        print(f"  из них credit+ : {max_credit}")
+        print(f"  из них mortgage: {max_mortgage}")
