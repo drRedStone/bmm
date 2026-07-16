@@ -30,3 +30,7 @@ Thumbs.db
 *.log
 *.tmp
 *.swp
+
+# Отчёты
+sim_report/
+report/

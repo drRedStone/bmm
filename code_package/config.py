@@ -1,3 +1,6 @@
+from pathlib import Path
+
+
 WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 MAX_WORK_TIME = 9
 MAX_HOURS_WEEK = 40
@@ -15,4 +18,5 @@ SKILLS = {"junior": "basic", "middle": "basic,credit", "senior": "basic,credit,m
 OPEN_HOUR = 9 # чекать, где используется и менять на обращение к словарю
 
 REPORT_SAVE_DIRECTORY = Path(__file__).parent.parent / 'report'
+SIM_REPORT_SAVE_DIRECTORY = Path(__file__).parent.parent / 'sim_report'
 GRADE_COLORS = {'junior': 'limegreen', 'middle': 'orange', 'senior': 'tomato'}
