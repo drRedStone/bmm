@@ -23,4 +23,5 @@ OPEN_HOUR = 9 # чекать, где используется и менять н
 
 REPORT_SAVE_DIRECTORY = Path(__file__).parent.parent / 'report'
 SIM_REPORT_SAVE_DIRECTORY = Path(__file__).parent.parent / 'sim_report'
+OPTIMIZE_STAFF_REPORT_SAVE_DIRECTORY = Path(__file__).parent.parent / 'optimize_staff'
 GRADE_COLORS = {'junior': 'limegreen', 'middle': 'orange', 'senior': 'tomato'}

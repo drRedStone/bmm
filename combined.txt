@@ -1,0 +1,3308 @@
+```compare_branches.py
+"""
+compare_branches.py
+====================
+То же сравнение naive/greedy/ILP, что и в compare_policies.py, но по всем
+трём отделениям сразу (один день — понедельник) — чтобы увидеть, как разрыв
+между жадным и ILP меняется в зависимости от состава персонала отделения
+(особенно BR03, где меньше всего гибкости по кадрам).
+"""
+import pandas as pd
+import numpy as np
+from required_windows import required_windows_table
+from schedule_greedy import schedule_day
+from schedule_ilp import schedule_day_ilp_soft
+from compare_policies import naive_schedule, coverage_from_assignments, avg_wait_for_coverage
+
+from config import WEEKDAY_HOURS
+
+
+WEEKDAY_EN = 'Monday' # Это для таблицы сравнения графиков по отделниям на 1 день (на понедельник)
+
+
+def compare_branch(ca: pd.DataFrame, ops: pd.DataFrame, br: pd.DataFrame,
+                    emp_raw: pd.DataFrame, branch_id: str) -> dict:
+    """
+    Считает наивную/жадную/ILP политику для ОДНОГО отделения в понедельник
+    и собирает сводку по каждой (среднее ожидание, ФОТ, число сотрудников,
+    недобор total-уровня), плюс справочные метрики состава штата отделения.
+
+    Args:
+        ca: датафрейм client_arrivals.csv.
+        ops: датафрейм operations.csv.
+        br: датафрейм branches.csv, индексированный по branch_id.
+        emp_raw: полный датафрейм employees.csv (столбец skills уже должен
+            быть распарсен в list через .str.split(',')).
+        branch_id: идентификатор отделения.
+
+    Returns:
+        dict с ключами 'naive', 'greedy', 'ilp' (каждый — dict с avg_wait,
+        cost, n_staff, shortfall_total) и справочными ключами
+        n_employees_total, n_credit_plus, n_senior (состав штата отделения —
+        удобно для подписей на графиках и объяснения различий между
+        отделениями).
+    """
+    n_win = int(br.loc[branch_id, 'n_windows'])
+    req = required_windows_table(ca, ops, branch_id, WEEKDAY_EN, n_win)
+    branch_emp = emp_raw[emp_raw['branch_id'] == branch_id].reset_index(drop=True)
+    hours = list(req['hour'])
+
+    a_naive = naive_schedule(branch_emp, n_win)
+    a_greedy, cov_greedy_df, unresolved, _ = schedule_day(branch_emp, req, *WEEKDAY_HOURS[WEEKDAY_EN], n_windows_max=n_win)
+    a_ilp, cov_ilp_df, status, _, shortfall = schedule_day_ilp_soft(branch_emp, req, *WEEKDAY_HOURS[WEEKDAY_EN], n_win)
+
+    out = {}
+    for name, assigns in [('naive', a_naive), ('greedy', a_greedy), ('ilp', a_ilp)]:
+        cov = coverage_from_assignments(assigns, hours)
+        waits, weights = avg_wait_for_coverage(req, cov)
+        out[name] = dict(avg_wait=np.average(waits, weights=weights),
+                          cost=sum(a['shift_cost'] for a in assigns),
+                          n_staff=len(assigns),
+                          shortfall_total=sum(max(0, r - cov[h]) for h, r in zip(hours, req['R_total'])))
+    out['n_employees_total'] = len(branch_emp)
+    out['n_credit_plus'] = int(branch_emp['skills'].apply(lambda s: 'credit' in s or 'mortgage' in s).sum())
+    out['n_senior'] = int((branch_emp['grade'] == 'senior').sum())
+    return out
+
+
+if __name__ == '__main__':
+    ca = pd.read_csv('dataset/client_arrivals.csv')
+    ops = pd.read_csv('dataset/operations.csv')
+    br = pd.read_csv('dataset/branches.csv').set_index('branch_id')
+    emp_raw = pd.read_csv('dataset/employees.csv')
+    emp_raw['skills'] = emp_raw['skills'].str.split(',')
+
+    all_results = {}
+    for bid in ['BR01', 'BR02', 'BR03']:
+        res = compare_branch(ca, ops, br, emp_raw, bid)
+        all_results[bid] = res
+        print(f"\n=== {bid} (senior={res['n_senior']}, credit+={res['n_credit_plus']}, всего={res['n_employees_total']}) ===")
+        for pol in ['naive', 'greedy', 'ilp']:
+            r = res[pol]
+            print(f"  {pol:7s}: сотрудников={r['n_staff']}, ФОТ={r['cost']:6.0f} руб., "
+                  f"ожидание={r['avg_wait']:5.1f} мин, недобор total-окно-час={r['shortfall_total']}")
+        gap = res['greedy']['avg_wait'] - res['ilp']['avg_wait']
+        print(f"  >> Разрыв greedy-ILP по ожиданию: {gap:.1f} мин")
+
+    import json
+    with open('branch_comparison.json', 'w') as f:
+        json.dump(all_results, f, indent=2, default=str)
+
+```
+```compare_policies.py
+"""
+compare_policies.py
+====================
+Честное сравнение трёх политик расписания на один день/отделение по
+РЕАЛЬНОМУ среднему времени ожидания — не по целевому R(t), а по формуле
+Эрланга C, применённой к ФАКТИЧЕСКИ достигнутому числу окон каждой
+политики. Так наивная/жадная/ILP схемы сравниваются на равных: у каждой
+может быть свой недобор относительно R(t), и важно именно то, во что этот
+недобор выливается в реальном ожидании клиента.
+
+Три политики:
+    1. naive  — «все выходят в 9:00» (текущий ручной способ из брифа: столько
+       сотрудников, сколько окон, все с одной смены, обед по очереди).
+    2. greedy — жадный алгоритм (schedule_greedy.schedule_day).
+    3. ilp    — точный ILP с мягкими штрафами за недобор (schedule_ilp.schedule_day_ilp_soft).
+"""
+from binascii import Error
+from pathlib import Path
+
+import pandas as pd
+import numpy as np
+import os
+from typing import Dict, List, Optional, Tuple
+import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
+
+from required_windows import required_windows_table, erlang_c_wait_minutes
+from schedule_greedy import schedule_day, generate_patterns, schedule_week
+from schedule_ilp import schedule_day_ilp_soft, schedule_week_ilp
+
+from config import WEEKDAY_HOURS, OPEN_HOUR, MAX_WORK_TIME, MAX_HOURS_WEEK, REPORT_SAVE_DIRECTORY, GRADE_COLORS
+
+
+if __name__ == '__main__':
+    if os.path.exists(REPORT_SAVE_DIRECTORY) and not os.path.isdir(REPORT_SAVE_DIRECTORY):
+        raise Error('failed to create save dir')
+    elif not os.path.exists(REPORT_SAVE_DIRECTORY):
+        os.mkdir(REPORT_SAVE_DIRECTORY)
+
+
+def naive_schedule(employees: pd.DataFrame, n_windows_max: int, open_hour: int = OPEN_HOUR,
+                    lunch_start: int = 12) -> List[Dict]:
+    """
+    Строит "наивное" расписание — имитацию текущего ручного процесса из
+    брифа ("все выходят на 9:00, обед по очереди"): берутся первые
+    n_windows_max сотрудников (без учёта квалификации или стоимости — именно
+    так поступает менеджер "на глаз"), все получают одинаковую 9-часовую
+    смену с open_hour, обед распределяется по очереди небольшими сдвигами.
+
+    Специально НЕ учитывает форму спроса по часам и квалификацию — в этом
+    и состоит "наивность" данной политики, она служит базовой линией
+    сравнения (baseline) для greedy и ilp.
+
+    Args:
+        employees: датафрейм сотрудников отделения.
+        n_windows_max: физическое число окон отделения (= число сотрудников,
+            которых выберет наивная схема).
+        open_hour: час начала смены (по умолчанию 9 — открытие отделения).
+        lunch_start: с какого часа начинается очередь обедов.
+
+    Returns:
+        Список dict-назначений (тот же формат, что у schedule_greedy.schedule_day).
+    """
+    chosen = employees.head(n_windows_max).reset_index(drop=True)
+    assignments = []
+    for i, e in chosen.iterrows():
+        lunch_hour = lunch_start + (i % 4)  # обед по очереди, максимум растягиваем на 4 часа
+        start, end = open_hour, open_hour + MAX_WORK_TIME
+        serving = tuple(h for h in range(start, end) if h != lunch_hour)
+        assignments.append(dict(employee_id=e['employee_id'], grade=e['grade'], start=start, end=end,
+                                 lunch_hour=lunch_hour, serving_hours=serving, paid_hours=len(serving),
+                                 hourly_cost=e['hourly_cost_rub'], shift_cost=len(serving) * e['hourly_cost_rub']))
+    return assignments
+
+
+def coverage_from_assignments(assignments: List, hours: List[int]) -> Dict[int, int]:
+    """
+    Считает фактическое число открытых окон по часам для заданного списка
+    назначений смен — сколько сотрудников реально обслуживают окно в каждый
+    час (не в отпуске/на обеде).
+
+    Args:
+        assignments: список dict-назначений (как возвращает schedule_day,
+            schedule_day_ilp_soft или naive_schedule) — используются только
+            поля employee_id и serving_hours.
+        hours: список часов, для которых нужно посчитать покрытие (обычно
+            все часы работы отделения в этот день).
+
+    Returns:
+        dict {hour: число сотрудников, обслуживающих окно в этот час}.
+    """
+    cov = {h: 0 for h in hours}
+    for a in assignments:
+        for h in a['serving_hours']:
+            if h in cov:
+                cov[h] += 1
+    return cov
+
+
+def avg_wait_for_coverage(req: pd.DataFrame, cov: dict, cap_minutes: float = 90.0) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Переводит фактическое почасовое покрытие (число открытых окон) в
+    реальное среднее время ожидания через формулу Эрланга C — это и есть
+    "честная" метрика качества расписания, независимая от того, как именно
+    расписание было построено.
+
+    Args:
+        req: датафрейм из required_windows_table (нужны столбцы hour,
+            lambda_total, avg_service_min).
+        cov: dict {hour: число открытых окон} — обычно результат
+            coverage_from_assignments().
+        cap_minutes: потолок для отображения на графиках — если Wq
+            бесконечно (система нестабильна, окон не хватает даже
+            теоретически) или очень велико, значение обрезается до
+            cap_minutes, чтобы графики оставались читаемыми.
+
+    Returns:
+        Кортеж (waits, weights) — оба numpy-массивы одинаковой длины
+        (по одному элементу на час из req): waits — среднее ожидание в
+        минутах в этот час, weights — интенсивность потока в этот час
+        (используется как вес при подсчёте средневзвешенного показателя за
+        день: np.average(waits, weights=weights), чтобы часы с большим
+        потоком клиентов вносили больший вклад в итоговую оценку).
+    """
+    waits, weights = [], []
+    for _, row in req.iterrows():
+        h = row['hour']
+        lam = row['lambda_total']
+        mu = 60.0 / row['avg_service_min'] if row['avg_service_min'] > 0 else np.nan
+        c = cov.get(h, 0)
+        wq = erlang_c_wait_minutes(lam, mu, c) if lam > 0 else 0.0
+        wq = min(wq, cap_minutes) if np.isfinite(wq) else cap_minutes  # для читаемости графика ограничиваем "потолком"
+        waits.append(wq)
+        weights.append(lam)
+    return np.array(waits), np.array(weights)
+
+
+# --------------- Новые функции анализа ---------------
+
+def get_weekly_metrics(
+    results: dict,
+    summary: pd.DataFrame,
+    client_arrivals: pd.DataFrame,
+    operations: pd.DataFrame,
+    branch_id: str,
+    branches: pd.DataFrame
+) -> dict:
+    """Вычисляет ключевые метрики по недельному расписанию отделения.
+
+    Для каждого дня недели:
+    - рассчитывает фактическое покрытие окон,
+    - средневзвешенное время ожидания (через формулу Эрланга C),
+    - ФОТ и суммарный недобор total-окон.
+
+    Args:
+        results: результат работы schedule_week_ilp – словарь
+            {weekday: {'assignments': ..., 'coverage': ..., 'status': ..., 'shortfall': ...}}.
+        summary: недельная загрузка сотрудников (DataFrame из schedule_week_ilp).
+        client_arrivals: сырой DataFrame визитов.
+        operations: DataFrame операций.
+        branch_id: идентификатор отделения.
+        branches: DataFrame отделений, индекс branch_id.
+
+    Returns:
+        Словарь с ключами:
+        - total_cost: общий ФОТ за неделю,
+        - avg_wait_weighted: средневзвешенное ожидание за неделю (мин),
+        - total_shortfall: суммарный недобор total-окон за неделю (окно‑часов),
+        - daily_metrics: список словарей для каждого дня с полями:
+            weekday, cost, avg_wait, shortfall, weight (интенсивность потока),
+        - employee_summary: DataFrame загрузки сотрудников (hours_this_week, utilization).
+    """
+    n_win = int(branches.loc[branch_id, 'n_windows'])
+    daily_metrics = []
+    total_cost = 0.0
+    total_shortfall = 0.0
+    total_weight = 0.0
+    weighted_wait_sum = 0.0
+
+    for weekday, data in results.items():
+        assignments = data['assignments']
+        coverage = data['coverage']  # DataFrame
+        req = required_windows_table(client_arrivals, operations, branch_id, weekday, n_win)
+        if req.empty:
+            continue
+
+        day_cost = sum(a['shift_cost'] for a in assignments)
+        total_cost += day_cost
+
+        day_shortfall = (coverage['R_total'] - coverage['cov_total']).clip(lower=0).sum()
+        total_shortfall += day_shortfall
+
+        cov = coverage_from_assignments(assignments, list(req['hour']))
+        waits, weights = avg_wait_for_coverage(req, cov)
+        day_weight = weights.sum()
+        day_avg_wait = np.average(waits, weights=weights) if day_weight > 0 else 0.0
+        weighted_wait_sum += day_avg_wait * day_weight
+        total_weight += day_weight
+
+        daily_metrics.append({
+            'weekday': weekday,
+            'cost': day_cost,
+            'avg_wait': round(day_avg_wait, 2),
+            'shortfall': day_shortfall,
+            'weight': day_weight
+        })
+
+    avg_wait_weighted = weighted_wait_sum / total_weight if total_weight > 0 else 0.0
+
+    return {
+        'total_cost': total_cost,
+        'avg_wait_weighted': round(avg_wait_weighted, 2),
+        'total_shortfall': total_shortfall,
+        'daily_metrics': daily_metrics,
+        'employee_summary': summary
+    }
+
+
+def plot_weekly_schedule(
+    results: dict,
+    summary: pd.DataFrame,
+    client_arrivals: pd.DataFrame,
+    operations: pd.DataFrame,
+    branch_id: str,
+    branches: pd.DataFrame,
+    save_path: Optional[str] = None
+) -> None:
+    """Визуализирует недельное расписание: ожидание, покрытие, загрузка.
+
+    Строит три графика:
+    1. Среднее ожидание по дням недели (столбцы).
+    2. Покрытие окон (R_total vs cov_total) по часам для первого дня.
+    3. Загрузка сотрудников (utilization, горизонтальные столбцы).
+
+    Args:
+        results: результат schedule_week_ilp (словарь дней).
+        summary: недельная загрузка сотрудников.
+        client_arrivals, operations, branch_id, branches: данные для расчёта метрик.
+        save_path: если указан, сохраняет график в файл; иначе показывает на экране.
+    """
+    metrics = get_weekly_metrics(results, summary, client_arrivals, operations, branch_id, branches)
+
+    days = [m['weekday'] for m in metrics['daily_metrics']]
+    waits = [m['avg_wait'] for m in metrics['daily_metrics']]
+
+    plt.figure(figsize=(12, 4))
+    plt.subplot(1, 3, 1)
+    plt.bar(days, waits, color='skyblue')
+    plt.title('Среднее ожидание по дням')
+    plt.ylabel('Минут')
+    plt.xticks(rotation=45)
+
+    first_day = list(results.keys())[0]
+    cov_df = results[first_day]['coverage']
+    hours = cov_df['hour']
+    plt.subplot(1, 3, 2)
+    # Увеличенные маркеры, чтобы точки не терялись
+    plt.plot(hours, cov_df['R_total'], 'o-', markersize=8, label='Требуется')
+    plt.plot(hours, cov_df['cov_total'], 's-', markersize=8, label='Открыто')
+    plt.title(f'Покрытие ({first_day})')
+    plt.xlabel('Час')
+    plt.ylabel('Окна')
+    plt.legend()
+    plt.grid(True)
+
+    emp_summary = metrics['employee_summary']
+    employees = emp_summary['employee_id'].tolist()
+    utilization = (emp_summary['utilization'] * 100).tolist()
+    plt.subplot(1, 3, 3)
+    plt.barh(employees, utilization, color='salmon')
+    plt.title('Загрузка сотрудников (%)')
+    plt.xlabel('% от 40ч')
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=150)
+        print(f"График сохранён: {save_path}")
+    else:
+        plt.show()
+
+
+def weekly_schedule_to_json(
+    results: dict,
+    summary: pd.DataFrame,
+    client_arrivals: pd.DataFrame,
+    operations: pd.DataFrame,
+    branch_id: str,
+    branches: pd.DataFrame
+) -> dict:
+    """Формирует JSON-совместимый словарь с метриками и данными для клиентского рендеринга.
+
+    Возвращает структуру, которую можно напрямую передать в json.dumps.
+    Все числовые значения приведены к стандартным типам Python.
+
+    Args:
+        Аргументы те же, что и у get_weekly_metrics.
+
+    Returns:
+        Словарь с ключами:
+        - total_cost, avg_wait_weighted, total_shortfall,
+        - daily: список по дням, где каждый день содержит:
+            weekday, cost, avg_wait, shortfall,
+            hourly: список {hour, R_total, cov_total, wait_min}.
+        - employees: список {employee_id, hours, utilization}.
+    """
+    metrics = get_weekly_metrics(results, summary, client_arrivals, operations, branch_id, branches)
+    n_win = int(branches.loc[branch_id, 'n_windows'])
+
+    daily_json = []
+    for day_metric in metrics['daily_metrics']:
+        weekday = day_metric['weekday']
+        data = results[weekday]
+        assignments = data['assignments']
+        coverage_df = data['coverage']
+
+        req = required_windows_table(client_arrivals, operations, branch_id, weekday, n_win)
+        cov = coverage_from_assignments(assignments, list(req['hour']))
+        waits_hourly, _ = avg_wait_for_coverage(req, cov)
+
+        hourly_data = []
+        for _, row in coverage_df.iterrows():
+            h = int(row['hour'])
+            w = waits_hourly[list(req['hour']).index(h)]
+            hourly_data.append({
+                'hour': h,
+                'R_total': int(row['R_total']),
+                'cov_total': int(row['cov_total']),
+                'wait_min': float(round(w, 2))
+            })
+
+        daily_json.append({
+            'weekday': weekday,
+            'cost': float(day_metric['cost']),
+            'avg_wait': float(day_metric['avg_wait']),
+            'shortfall': int(day_metric['shortfall']),
+            'hourly': hourly_data
+        })
+
+    employees_json = []
+    for _, emp_row in metrics['employee_summary'].iterrows():
+        employees_json.append({
+            'employee_id': emp_row['employee_id'],
+            'hours': int(emp_row['hours_this_week']),
+            'utilization': float(emp_row['utilization'])
+        })
+
+    return {
+        'total_cost': float(metrics['total_cost']),
+        'avg_wait_weighted': float(metrics['avg_wait_weighted']),
+        'total_shortfall': int(metrics['total_shortfall']),
+        'daily': daily_json,
+        'employees': employees_json
+    }
+
+
+def plot_daily_schedule(assignments: List[Dict], title: str = "Расписание смен", save_path: Optional[str] = None) -> None:
+    """Гант-диаграмма смен на один день.
+
+    Args:
+        assignments: список назначений (тот же формат, что возвращает schedule_day).
+        title: заголовок графика.
+        save_path: если задан, сохраняет график в файл.
+    """
+    if not assignments:
+        print("Нет назначений для отображения.")
+        return
+
+    fig, ax = plt.subplots(figsize=(10, max(4, len(assignments) * 0.5)))
+    employees = sorted(assignments, key=lambda a: (a['start'], a['employee_id']))
+    y_labels = []
+    y_pos = 0
+    for a in employees:
+        eid = a['employee_id']
+        grade = a.get('grade', '')
+        label = f"{eid} ({grade})" if grade else eid
+        y_labels.append(label)
+        work_ranges = []
+        lunch_range = None
+        if a['lunch_hour'] is not None:
+            if a['start'] < a['lunch_hour']:
+                work_ranges.append((a['start'], a['lunch_hour'] - a['start']))
+            if a['lunch_hour'] + 1 < a['end']:
+                work_ranges.append((a['lunch_hour'] + 1, a['end'] - (a['lunch_hour'] + 1)))
+            lunch_range = (a['lunch_hour'], 1)
+        else:
+            work_ranges.append((a['start'], a['end'] - a['start']))
+
+        for start, duration in work_ranges:
+            ax.broken_barh([(start, duration)], (y_pos - 0.4, 0.8), facecolors=GRADE_COLORS.get(grade, 'tab:blue'), edgecolor='black')
+        if lunch_range:
+            ax.broken_barh([lunch_range], (y_pos - 0.4, 0.8), facecolors='lightgray', edgecolor='black', hatch='//')
+
+        y_pos += 1
+
+    ax.set_yticks(range(len(y_labels)))
+    ax.set_yticklabels(y_labels)
+    ax.set_xlabel('Час дня')
+    ax.set_title(title)
+    min_hour = min(a['start'] for a in employees)
+    max_hour = max(a['end'] for a in employees)
+    ax.set_xlim(min_hour - 0.5, max_hour + 0.5)
+    ax.set_xticks(range(min_hour, max_hour + 1))
+    ax.grid(axis='x', linestyle='-', alpha=0.3)
+    legend_elements = [
+    Patch(facecolor=color, label=str(grade)) 
+    for grade, color in GRADE_COLORS.items()
+    ] + [Patch(facecolor='lightgray', hatch='//', label='Обед')]
+    plt.legend(handles=legend_elements, bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=150)
+        print(f"График смен сохранён: {save_path}")
+    else:
+        plt.show()
+
+
+def main():
+    """Сравнение naive, greedy и ILP за один день (BR01, Monday)."""
+    ca = pd.read_csv('dataset/client_arrivals.csv')
+    ops = pd.read_csv('dataset/operations.csv')
+    br = pd.read_csv('dataset/branches.csv').set_index('branch_id')
+    emp_raw = pd.read_csv('dataset/employees.csv')
+    emp_raw['skills'] = emp_raw['skills'].str.split(',')
+
+    BRANCH, WEEKDAY_EN = 'BR01', 'Monday' # Это для таблицы сравнения графиков по отделниям на 1 день
+    n_win = int(br.loc[BRANCH, 'n_windows'])
+    req = required_windows_table(ca, ops, BRANCH, WEEKDAY_EN, n_win)
+    branch_emp = emp_raw[emp_raw['branch_id'] == BRANCH].reset_index(drop=True)
+    hours = list(req['hour'])
+
+    a_naive = naive_schedule(branch_emp, n_win)
+    a_greedy, cov_greedy_df, unresolved, _ = schedule_day(branch_emp, req, *WEEKDAY_HOURS[WEEKDAY_EN], n_windows_max=n_win)
+    a_ilp, cov_ilp_df, status, _, shortfall = schedule_day_ilp_soft(branch_emp, req, *WEEKDAY_HOURS[WEEKDAY_EN], n_win)
+
+    cov_naive = coverage_from_assignments(a_naive, hours)
+    cov_greedy = coverage_from_assignments(a_greedy, hours)
+    cov_ilp = coverage_from_assignments(a_ilp, hours)
+
+    results = {}
+    for name, cov, assigns in [('naive', cov_naive, a_naive), ('greedy', cov_greedy, a_greedy), ('ilp', cov_ilp, a_ilp)]:
+        waits, weights = avg_wait_for_coverage(req, cov)
+        avg_wait = np.average(waits, weights=weights)
+        cost = sum(a['shift_cost'] for a in assigns)
+        n_staff = len(assigns)
+        results[name] = dict(cov=cov, waits=waits, avg_wait=avg_wait, cost=cost, n_staff=n_staff)
+        print(f"{name:8s}: сотрудников={n_staff}, ФОТ={cost:5.0f} руб., "
+              f"средневзв. ожидание={avg_wait:5.1f} мин, покрытие по часам={list(cov.values())}")
+
+    import json
+    with open('policy_comparison.json', 'w') as f:
+        json.dump({k: {kk: (vv.tolist() if isinstance(vv, np.ndarray) else vv) for kk, vv in v.items() if kk != 'cov'}
+                   for k, v in results.items()}, f, indent=2, default=str)
+
+
+def main2():
+    """Недельное планирование для BR01: ILP и Greedy, вывод метрик, графиков и JSON."""
+    # (Оставлена для совместимости – теперь можно вызывать generate_all_reports)
+    ca = pd.read_csv('dataset/client_arrivals.csv')
+    ops = pd.read_csv('dataset/operations.csv')
+    br = pd.read_csv('dataset/branches.csv').set_index('branch_id')
+    emp = pd.read_csv('dataset/employees.csv')
+    emp['skills'] = emp['skills'].str.split(',')
+
+    BRANCH = 'BR01'
+    n_win = int(br.loc[BRANCH, 'n_windows'])
+
+    # === ILP ===
+    print("\n" + "="*50)
+    print("НЕДЕЛЬНОЕ ПЛАНИРОВАНИЕ (ILP)")
+    results_ilp, summary_ilp = schedule_week_ilp(ca, ops, emp, br, BRANCH)
+    metrics_ilp = get_weekly_metrics(results_ilp, summary_ilp, ca, ops, BRANCH, br)
+    print(f"[ILP] Общий ФОТ за неделю: {metrics_ilp['total_cost']:.0f} руб.")
+    print(f"[ILP] Средневзвешенное ожидание за неделю: {metrics_ilp['avg_wait_weighted']} мин")
+    print("[ILP] Недельная загрузка сотрудников:")
+    print(summary_ilp.to_string(index=False))
+
+    if 'Monday' in results_ilp:
+        plot_daily_schedule(results_ilp['Monday']['assignments'],
+                            title="ILP – BR01 Monday", save_path=str(REPORT_SAVE_DIRECTORY / "gantt_ilp_monday.png"))
+
+    plot_weekly_schedule(results_ilp, summary_ilp, ca, ops, BRANCH, br, save_path=str(REPORT_SAVE_DIRECTORY / "weekly_schedule_ilp.png"))
+    json_ilp = weekly_schedule_to_json(results_ilp, summary_ilp, ca, ops, BRANCH, br)
+    import json
+    with open(str(REPORT_SAVE_DIRECTORY / 'weekly_schedule_ilp.json'), 'w') as f:
+        json.dump(json_ilp, f, indent=2, ensure_ascii=False)
+
+    # === Greedy ===
+    print("\n" + "="*50)
+    print("НЕДЕЛЬНОЕ ПЛАНИРОВАНИЕ (Greedy)")
+    results_greedy, summary_greedy = schedule_week(ca, ops, emp, br, BRANCH)
+    metrics_greedy = get_weekly_metrics(results_greedy, summary_greedy, ca, ops, BRANCH, br)
+    print(f"[Greedy] Общий ФОТ за неделю: {metrics_greedy['total_cost']:.0f} руб.")
+    print(f"[Greedy] Средневзвешенное ожидание за неделю: {metrics_greedy['avg_wait_weighted']} мин")
+    print("[Greedy] Недельная загрузка сотрудников:")
+    print(summary_greedy.to_string(index=False))
+
+    if 'Monday' in results_greedy:
+        plot_daily_schedule(results_greedy['Monday']['assignments'],
+                            title="Greedy – BR01 Monday", save_path=str(REPORT_SAVE_DIRECTORY / "gantt_greedy_monday.png"))
+
+    plot_weekly_schedule(results_greedy, summary_greedy, ca, ops, BRANCH, br, save_path=str(REPORT_SAVE_DIRECTORY / "weekly_schedule_greedy.png"))
+    json_greedy = weekly_schedule_to_json(results_greedy, summary_greedy, ca, ops, BRANCH, br)
+    with open(str(REPORT_SAVE_DIRECTORY / 'weekly_schedule_greedy.json'), 'w') as f:
+        json.dump(json_greedy, f, indent=2, ensure_ascii=False)
+
+    print("\nВсе графики и JSON сохранены.")
+
+
+# ----------------------------------------------------------------------
+# Основная функция генерации всех отчётов
+# ----------------------------------------------------------------------
+def generate_all_reports() -> None:
+    """
+    Генерирует для каждого отделения и каждого рабочего дня:
+      - гант-диаграммы расписаний (ILP и Greedy)
+      - недельные сводные графики (ожидание, покрытие, загрузка)
+      - JSON с метриками.
+    Все файлы сохраняются в report/<branch>/<algorithm>/
+    """
+    ca = pd.read_csv('dataset/client_arrivals.csv')
+    ops = pd.read_csv('dataset/operations.csv')
+    br = pd.read_csv('dataset/branches.csv').set_index('branch_id')
+    emp = pd.read_csv('dataset/employees.csv')
+    emp['skills'] = emp['skills'].str.split(',')
+
+    branches = ['BR01', 'BR02', 'BR03']
+    weekdays = list(WEEKDAY_HOURS.keys())  # Monday..Saturday
+
+    for branch in branches:
+        print(f"\n===== Отделение {branch} =====")
+        branch_emp = emp[emp['branch_id'] == branch]
+        n_win = int(br.loc[branch, 'n_windows'])
+
+        # Папки для отделения
+        base_dir = REPORT_SAVE_DIRECTORY / branch
+        for alg in ['ilp', 'greedy']:
+            (base_dir / alg).mkdir(parents=True, exist_ok=True)
+
+        # Недельное планирование (ILP и Greedy) для получения расписаний
+        results_ilp, summary_ilp = schedule_week_ilp(ca, ops, emp, br, branch)
+        results_greedy, summary_greedy = schedule_week(ca, ops, emp, br, branch)
+
+        # Гант-диаграммы для каждого дня
+        for day in weekdays:
+            if day not in results_ilp:
+                continue
+            # ILP
+            plot_daily_schedule(
+                results_ilp[day]['assignments'],
+                title=f"ILP {branch} {day}",
+                save_path=str(base_dir / 'ilp' / f'gantt_{day}.png')
+            )
+            # Greedy
+            plot_daily_schedule(
+                results_greedy[day]['assignments'],
+                title=f"Greedy {branch} {day}",
+                save_path=str(base_dir / 'greedy' / f'gantt_{day}.png')
+            )
+
+        # Недельные сводные графики
+        plot_weekly_schedule(
+            results_ilp, summary_ilp, ca, ops, branch, br,
+            save_path=str(base_dir / 'ilp' / 'weekly_summary.png')
+        )
+        plot_weekly_schedule(
+            results_greedy, summary_greedy, ca, ops, branch, br,
+            save_path=str(base_dir / 'greedy' / 'weekly_summary.png')
+        )
+
+        # Сохранение JSON с метриками
+        import json
+        json_ilp = weekly_schedule_to_json(results_ilp, summary_ilp, ca, ops, branch, br)
+        json_greedy = weekly_schedule_to_json(results_greedy, summary_greedy, ca, ops, branch, br)
+        with open(str(base_dir / 'ilp' / 'metrics.json'), 'w') as f:
+            json.dump(json_ilp, f, indent=2, ensure_ascii=False)
+        with open(str(base_dir / 'greedy' / 'metrics.json'), 'w') as f:
+            json.dump(json_greedy, f, indent=2, ensure_ascii=False)
+
+        print(f"  Готово: {branch}")
+
+    print("\nВсе отчёты сохранены в", REPORT_SAVE_DIRECTORY)
+
+
+if __name__ == '__main__':
+    generate_all_reports()
+
+```
+```config.py
+from pathlib import Path
+
+
+WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+MAX_WORK_TIME = 9
+MAX_HOURS_WEEK = 40
+MAX_WORK_TIME_BEFORE_LAUNCH = 4
+MIN_WORK_TIME = 2
+MIN_TIME_BETWEEN_BREAK_AND_END = 1
+WEEKDAY_HOURS = {  # (open_hour, close_hour) — из branches.csv: будни 09-19, суббота 09-16, воскресенье закрыто
+    'Monday': (9, 19), 'Tuesday': (9, 19), 'Wednesday': (9, 19),
+    'Thursday': (9, 19), 'Friday': (9, 19), 'Saturday': (9, 16),
+}
+
+WERGES = {"junior": 350, "middle": 500, "senior": 700}
+SKILLS = {
+    "junior": ["basic"],
+    "middle": ["basic", "credit"],
+    "senior": ["basic", "credit", "mortgage"]
+}
+
+OPEN_HOUR = 9 # чекать, где используется и менять на обращение к словарю
+
+REPORT_SAVE_DIRECTORY = Path(__file__).parent.parent / 'report'
+SIM_REPORT_SAVE_DIRECTORY = Path(__file__).parent.parent / 'sim_report'
+OPTIMIZE_STAFF_REPORT_SAVE_DIRECTORY = Path(__file__).parent.parent / 'optimize_staff'
+GRADE_COLORS = {'junior': 'limegreen', 'middle': 'orange', 'senior': 'tomato'}
+
+```
+```estimate_lambda.py
+"""
+estimate_lambda.py
+===================
+Оценка интенсивности λ(t) потока клиентов по часам/дням недели/отделениям.
+
+Источник: dataset/hourly_load.csv (уже агрегированные по часам данные,
+кросс-валидируется с client_arrivals.csv — расхождений не найдено).
+
+Ключевая идея: интенсивность лямбда оценивается как среднее число клиентов,
+пришедших в данный час данного дня недели, усреднённое по 4 наблюдаемым неделям.
+Это несмещённая MLE-оценка параметра пуассоновского распределения (лямбда = среднее).
+
+Дополнительно проверяем степень отклонения от чистого пуассоновского процесса:
+если var/mean > 1 (overdispersion), это согласуется с описанием генератора
+в README/брифе — интенсивность самого дня "гуляет" на ±15% (случайный шум),
+то есть реальный процесс — Poisson-Gamma mixture (по сути Negative Binomial)
+на уровне "день-час", а не чистый однородный Пуассон с фиксированной лямбдой.
+Внутри одного часа в один конкретный день условно (при фиксированной лямбда
+этого дня) распределение всё ещё пуассоновское — это стандартное и корректное
+допущение для очередной модели M/M/c на часовых интервалах (используется в
+required_windows.py).
+
+Этот скрипт — самостоятельная утилита для первичного EDA и выгрузки CSV;
+required_windows.required_windows_table() делает аналогичную оценку λ
+заново из client_arrivals.csv напрямую (без промежуточного hourly_load.csv),
+т.к. ей дополнительно нужна разбивка по типу операции (basic/credit/mortgage),
+которой в hourly_load.csv нет.
+"""
+import pandas as pd
+import numpy as np
+
+WEEKDAY_ORDER = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб']
+WD_MAP = {0: 'Пн', 1: 'Вт', 2: 'Ср', 3: 'Чт', 4: 'Пт', 5: 'Сб', 6: 'Вс'}
+
+
+def load() -> pd.DataFrame:
+    """
+    Загружает dataset/hourly_load.csv и добавляет столбец weekday (день
+    недели по-русски, выведенный из даты).
+
+    Returns:
+        DataFrame со столбцами исходного hourly_load.csv (date, branch_id,
+        hour, n_clients, total_service_min) плюс weekday.
+    """
+    df = pd.read_csv('dataset/hourly_load.csv')
+    df['date'] = pd.to_datetime(df['date'])
+    df['weekday'] = df['date'].dt.weekday.map(WD_MAP)
+    return df
+
+
+def lambda_table(df: pd.DataFrame, branch_id: str = None) -> pd.DataFrame:
+    """
+    MLE-оценка λ(hour, weekday) — среднее число клиентов по наблюдаемым
+    неделям для каждого часового слота, плюс дисперсия и индекс дисперсии
+    (var/λ) для проверки допущения о пуассоновости.
+
+    Args:
+        df: датафрейм из load() (или совместимый по структуре).
+        branch_id: если задан — оценка только по этому отделению; если
+            None — по всем отделениям, СМЕШАННЫМ вместе построчно (не
+            просуммированным по часам — для суммарной оценки по всем
+            отделениям сразу см. блок __main__ ниже, где потоки сначала
+            суммируются по дате/часу, а потом усредняются по неделям).
+
+    Returns:
+        DataFrame со столбцами weekday, hour, lambda_hat, var_hat, n_weeks,
+        dispersion_index — отсортированный по (weekday, hour).
+    """
+    d = df if branch_id is None else df[df['branch_id'] == branch_id]
+    grp = d.groupby(['weekday', 'hour'])['n_clients']
+    lam = grp.mean().rename('lambda_hat')
+    var = grp.var(ddof=1).rename('var_hat')
+    n_obs = grp.count().rename('n_weeks')
+    out = pd.concat([lam, var, n_obs], axis=1).reset_index()
+    out['dispersion_index'] = out['var_hat'] / out['lambda_hat']
+    out['weekday'] = pd.Categorical(out['weekday'], categories=WEEKDAY_ORDER, ordered=True)
+    return out.sort_values(['weekday', 'hour'])
+
+if __name__ == '__main__':
+    df = load()
+
+    # 1) Общая (по всем 3 отделениям суммарно) таблица λ
+    total_by_hour_wd = df.groupby(['date', 'weekday', 'hour'])['n_clients'].sum().reset_index()
+    grp = total_by_hour_wd.groupby(['weekday', 'hour'])['n_clients']
+    lam_total = grp.mean().rename('lambda_hat').reset_index()
+    var_total = grp.var(ddof=1).rename('var_hat').reset_index()
+    lam_total = lam_total.merge(var_total, on=['weekday', 'hour'])
+    lam_total['dispersion_index'] = lam_total['var_hat'] / lam_total['lambda_hat']
+    lam_total['weekday'] = pd.Categorical(lam_total['weekday'], categories=WEEKDAY_ORDER, ordered=True)
+    lam_total = lam_total.sort_values(['weekday', 'hour'])
+    lam_total.to_csv('lambda_estimates_all_branches.csv', index=False)
+
+    print("=== λ(hour, weekday), суммарно по 3 отделениям (клиентов/час) ===")
+    pivot = lam_total.pivot(index='weekday', columns='hour', values='lambda_hat').reindex(WEEKDAY_ORDER)
+    print(pivot.round(1).to_string())
+
+    print("\n=== Индекс дисперсии var/λ (>1 = overdispersion относительно Пуассона) ===")
+    disp_pivot = lam_total.pivot(index='weekday', columns='hour', values='dispersion_index').reindex(WEEKDAY_ORDER)
+    print(disp_pivot.round(2).to_string())
+
+    mean_disp = lam_total['dispersion_index'].mean()
+    print(f"\nСредний индекс дисперсии по всем слотам: {mean_disp:.2f}")
+    print("(=1 -> чистый Пуассон; >1 -> избыточная дисперсия, день-к-дню шум в λ)")
+
+    # per-branch tables
+    for b in sorted(df['branch_id'].unique()):
+        t = lambda_table(df, b)
+        t.to_csv(f'lambda_estimates_{b}.csv', index=False)
+        print(f"\nСохранено: lambda_estimates_{b}.csv")
+
+    # Пиковые и минимальные часы (по суммарной нагрузке)
+    peak = lam_total.loc[lam_total['lambda_hat'].idxmax()]
+    low = lam_total.loc[lam_total[lam_total['lambda_hat'] > 0]['lambda_hat'].idxmin()]
+    print(f"\nПик нагрузки: {peak['weekday']} {int(peak['hour'])}:00, λ≈{peak['lambda_hat']:.1f} клиентов/час (все 3 отделения)")
+    print(f"Минимум (не считая закрытых часов): {low['weekday']} {int(low['hour'])}:00, λ≈{low['lambda_hat']:.1f}")
+
+```
+```extract_lambda.py
+"""
+Строит тепловые карты интенсивности потока клиентов (heatmaps) на основе
+данных client_arrivals.csv.
+
+Для каждого отделения и типа операции вычисляется среднее число клиентов
+в час (lambda_count) и среднее за 4 недели (av_lambda), после чего
+сохраняются в папку heatmaps/:
+- отдельные heatmaps для каждой операции,
+- агрегированные по всем операциям для каждого отделения.
+
+Также создаётся сводная таблица lambda_parameters.csv.
+"""
+from pathlib import Path
+
+import pandas as pd
+import matplotlib
+from config import WEEKDAYS
+matplotlib.use('Agg')  # Чтобы работало без дисплея (headless)
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+path = Path(__file__).parent.parent
+
+# Загружаем данные
+clients = pd.read_csv(path / 'dataset/client_arrivals.csv')
+
+# Превращаем строку с датой в нормальный datetime
+clients['arrival_datetime'] = pd.to_datetime(clients['arrival_datetime'])
+
+# Извлекаем час и день недели
+clients['hour'] = clients['arrival_datetime'].dt.hour
+clients['weekday'] = clients['arrival_datetime'].dt.day_name()
+
+# Считаем число клиентов для каждой пары набора признаков
+hourly_load = clients.groupby(['weekday', 'hour', 'operation_id', 'branch_id']).size().reset_index(name='lambda_count')
+
+hourly_load['av_lambda'] = hourly_load['lambda_count']/4
+# Сохраняем в CSV — это ваш параметр λ(t)
+hourly_load.to_csv(path / 'heatmaps/lambda_parameters.csv', index=False)
+print("Параметр λ(t) сохранён в heatmaps/lambda_parameters.csv")
+print(hourly_load)
+
+for branch in ('BR01', 'BR02', 'BR03'):
+    for op in (1, 2, 3, 4, 5, 6):
+        op = f'OP0{op}'
+        for val in ('lambda_count', 'av_lambda'):
+            # Строим heatmap и сохраняем в PNG
+            pivot = hourly_load[(hourly_load['branch_id'] == branch) & (hourly_load['operation_id'] == op)].pivot(index='weekday', columns='hour', values=val)
+            # Упорядочиваем дни недели
+            pivot = pivot.reindex(WEEKDAYS)
+
+            plt.figure(figsize=(12, 6))
+            sns.heatmap(pivot, cmap='YlOrRd', annot=True, fmt='.0f')
+            plt.title(f'Интенсивность потока операций {op} в отделении {branch}')
+            plt.xlabel('Час дня')
+            plt.ylabel('День недели')
+            plt.tight_layout()
+            plt.savefig(path / f'heatmaps/heatmap_{branch}_{op}_{val}.png', dpi=150)
+            plt.close()
+            print(f"Heatmap_{branch}_{op}_{val} сохранён")
+for branch in ('BR01', 'BR02', 'BR03'):
+    for val in ('lambda_count', 'av_lambda'):
+        # Строим heatmap и сохраняем в PNG
+        aggregated = (hourly_load[hourly_load['branch_id'] == branch] \
+            .groupby(['weekday', 'hour'], as_index=False)[val] \
+            .sum())
+        pivot = aggregated.pivot(index='weekday', columns='hour', values=val)
+        # Упорядочиваем дни недели
+        pivot = pivot.reindex(WEEKDAYS)
+
+        plt.figure(figsize=(12, 6))
+        sns.heatmap(pivot, cmap='YlOrRd', annot=True, fmt='.0f')
+        plt.title(f'Интенсивность потока операций в отделении {branch}')
+        plt.xlabel('Час дня')
+        plt.ylabel('День недели')
+        plt.tight_layout()
+        plt.savefig(path / f'heatmaps/heatmap_{branch}_{val}.png', dpi=150)
+        plt.close()
+        print(f"Heatmap_{branch}_{val} сохранён")
+
+```
+```optimize_staff.py
+"""
+optimize_staff.py
+=================
+Подбор оптимального состава штата (junior, middle, senior) для
+отделения банка с использованием существующих модулей проекта.
+
+Включает:
+- перебор комбинаций сотрудников,
+- быстрый предварительный фильтр по пиковым требованиям,
+- запуск ILP-планировщика на неделю,
+- анализ результатов (Парето-фронт),
+- сводные и индивидуальные графики с таблицами,
+- JSON-отчёт.
+"""
+import pandas as pd
+import numpy as np
+from itertools import product
+from typing import Dict, Optional, List, Tuple
+import matplotlib.pyplot as plt
+import json
+from pathlib import Path
+
+from config import (
+    WERGES, SKILLS, WEEKDAY_HOURS,
+    OPTIMIZE_STAFF_REPORT_SAVE_DIRECTORY
+)
+from schedule_ilp import schedule_week_ilp
+from compare_policies import get_weekly_metrics
+from required_windows import required_windows_unconstrained
+
+
+# ----------------------------------------------------------------------
+# Вспомогательные функции
+# ----------------------------------------------------------------------
+def create_staff(junior: int, middle: int, senior: int, branch_id: str) -> pd.DataFrame:
+    """Создаёт синтетический штат сотрудников для одного отделения."""
+    employees = []
+    emp_id = 0
+    for grade, count in [('junior', junior), ('middle', middle), ('senior', senior)]:
+        for _ in range(count):
+            employees.append({
+                'employee_id': f'synth_{emp_id}',
+                'branch_id': branch_id,
+                'grade': grade,
+                'skills': SKILLS[grade],
+                'hourly_cost_rub': WERGES[grade],
+                'max_hours_week': 40,
+                'max_hours_day': 9,
+                'lunch_min': 60,
+                'name': None
+            })
+            emp_id += 1
+    if not employees:
+        return pd.DataFrame(columns=['employee_id', 'branch_id', 'name', 'grade',
+                                     'skills', 'hourly_cost_rub', 'max_hours_week',
+                                     'max_hours_day', 'lunch_min'])
+    return pd.DataFrame(employees)
+
+
+def compute_staff_lower_bounds(
+    client_arrivals: pd.DataFrame,
+    operations: pd.DataFrame,
+    branch_id: str
+) -> Tuple[int, int, int]:
+    """Возвращает минимально необходимое количество сотрудников каждого грейда."""
+    max_total = 0
+    max_credit = 0
+    max_mortgage = 0
+    for day in WEEKDAY_HOURS:
+        req = required_windows_unconstrained(client_arrivals, operations, branch_id, day)
+        if req.empty:
+            continue
+        max_total = max(max_total, req['R_total'].max())
+        max_credit = max(max_credit, req['R_credit'].max())
+        max_mortgage = max(max_mortgage, req['R_mortgage'].max())
+
+    min_senior = max_mortgage
+    min_middle_plus_senior = max_credit
+    min_middle = max(0, min_middle_plus_senior - min_senior)
+    min_total = max_total
+    min_junior = max(0, min_total - min_middle - min_senior)
+
+    return int(min_junior), int(min_middle), int(min_senior)
+
+
+# ----------------------------------------------------------------------
+# Основная функция подбора штата
+# ----------------------------------------------------------------------
+def optimize_staff_for_branch(
+    client_arrivals: pd.DataFrame,
+    operations: pd.DataFrame,
+    branches: pd.DataFrame,
+    branch_id: str,
+    max_junior: int = 6,
+    max_middle: int = 6,
+    max_senior: int = 4,
+    target_wait: Optional[float] = 10.0,
+    budget: Optional[float] = None,
+    verbose: bool = True
+) -> Dict:
+    """Подбирает оптимальный состав штата для одного отделения."""
+    min_j, min_m, min_s = compute_staff_lower_bounds(client_arrivals, operations, branch_id)
+    if verbose:
+        print(f"Минимальные требования: junior>={min_j}, middle>={min_m}, senior>={min_s}")
+
+    n_win = int(branches.loc[branch_id, 'n_windows'])
+    results = []
+
+    for j, m, s in product(range(max_junior + 1), range(max_middle + 1), range(max_senior + 1)):
+        if j < min_j or m < min_m or s < min_s:
+            continue
+        if j + m + s > 2 * n_win:
+            continue
+
+        staff = create_staff(j, m, s, branch_id)
+        try:
+            week_res, summary = schedule_week_ilp(
+                client_arrivals, operations, staff, branches, branch_id
+            )
+        except Exception:
+            continue
+
+        metrics = get_weekly_metrics(week_res, summary, client_arrivals,
+                                     operations, branch_id, branches)
+        cost = metrics['total_cost']
+        wait = metrics['avg_wait_weighted']
+        shortfall = metrics['total_shortfall']
+
+        if budget is not None and cost > budget:
+            continue
+        if target_wait is not None and wait > target_wait:
+            continue
+
+        results.append({
+            'junior': j, 'middle': m, 'senior': s,
+            'weekly_cost': cost,
+            'avg_wait_min': wait,
+            'total_shortfall': shortfall
+        })
+
+    if not results:
+        if verbose:
+            print("Не найдено ни одного допустимого варианта.")
+        return {'best': None, 'pareto': pd.DataFrame(), 'all': pd.DataFrame()}
+
+    df_all = pd.DataFrame(results).sort_values('total_shortfall')
+
+    # Парето-фронт
+    pareto_mask = np.ones(len(df_all), dtype=bool)
+    for i, (s1, c1) in enumerate(zip(df_all['total_shortfall'], df_all['weekly_cost'])):
+        for j, (s2, c2) in enumerate(zip(df_all['total_shortfall'], df_all['weekly_cost'])):
+            if s2 <= s1 and c2 <= c1 and (s2 < s1 or c2 < c1):
+                pareto_mask[i] = False
+                break
+    df_pareto = df_all[pareto_mask].sort_values('total_shortfall')
+    best_row = df_pareto.iloc[0]
+    best = (int(best_row['junior']), int(best_row['middle']), int(best_row['senior']),
+            best_row['weekly_cost'], best_row['avg_wait_min'], best_row['total_shortfall'])
+
+    return {'best': best, 'pareto': df_pareto, 'all': df_all}
+
+
+# ----------------------------------------------------------------------
+# Анализ и визуализация
+# ----------------------------------------------------------------------
+def analyze_optimization_results(all_results: Dict[str, Dict]) -> Dict:
+    """Собирает лучшие составы и Парето-фронты по всем отделениям."""
+    best_rows = []
+    pareto_dict = {}
+    full_dict = {}
+    for bid, res in all_results.items():
+        if res['best'] is None:
+            continue
+        j, m, s, cost, wait, sf = res['best']
+        best_rows.append({
+            'branch': bid,
+            'junior': j, 'middle': m, 'senior': s,
+            'weekly_cost': cost,
+            'avg_wait_min': wait,
+            'total_shortfall': sf
+        })
+        pareto_dict[bid] = res['pareto']
+        full_dict[bid] = res['all']
+    return {
+        'best': pd.DataFrame(best_rows),
+        'pareto': pareto_dict,
+        'full': full_dict
+    }
+
+
+def plot_branch_detail(branch_id: str, branch_results: Dict, save_path: Optional[str] = None) -> None:
+    """
+    Для одного отделения строит подробный график:
+    - Слева: диаграмма рассеяния всех вариантов (лучший выделен оранжевым),
+    - Справа: таблица всех вариантов.
+    """
+    df_all = branch_results['all']
+    best = branch_results['best']
+    if df_all.empty:
+        print(f"Нет данных для детального графика {branch_id}")
+        return
+
+    fig, (ax_scatter, ax_table) = plt.subplots(1, 2, figsize=(16, 6),
+                                               gridspec_kw={'width_ratios': [3, 2]})
+
+    # Диаграмма рассеяния
+    ax_scatter.scatter(df_all['weekly_cost']/1000, df_all['avg_wait_min'],
+                       c='lightgray', s=30, label='Все варианты')
+    if best is not None:
+        j, m, s, cost, wait, _ = best
+        ax_scatter.scatter(cost/1000, wait, c='orange', s=120, edgecolors='black',
+                           label=f'Лучший ({j},{m},{s})', zorder=5)
+    ax_scatter.set_xlabel('Недельный ФОТ, тыс. руб.')
+    ax_scatter.set_ylabel('Среднее время ожидания, мин')
+    ax_scatter.set_title(f'{branch_id} – все проверенные составы')
+    ax_scatter.legend(loc='upper right')
+    ax_scatter.grid(True, linestyle='--', alpha=0.7)
+
+    # Таблица
+    ax_table.axis('off')
+    columns = ['Junior', 'Middle', 'Senior', 'ФОТ/нед', 'Ожидание', 'Недобор']
+    cell_text = []
+    for _, row in df_all.iterrows():
+        cell_text.append([
+            str(int(row['junior'])),
+            str(int(row['middle'])),
+            str(int(row['senior'])),
+            f"{row['weekly_cost']:,.0f}",
+            f"{row['avg_wait_min']:.1f}",
+            f"{row['total_shortfall']:.0f}"
+        ])
+    table = ax_table.table(cellText=cell_text, colLabels=columns,
+                           cellLoc='center', loc='center',
+                           colWidths=[0.1, 0.1, 0.1, 0.18, 0.15, 0.12])
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    ax_table.set_title(f'{branch_id} – таблица всех вариантов', pad=20)
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=150)
+        print(f"Детальный график {branch_id} сохранён: {save_path}")
+    else:
+        plt.show()
+
+
+def plot_comparative_report(analysis: Dict, save_path: Optional[str] = None) -> None:
+    """
+    Сводный отчёт по всем отделениям:
+    - Столбцы стоимости и ожидания (легенда под графиком),
+    - Таблица лучших составов,
+    - Парето-фронты для каждого отделения.
+    """
+    best_df = analysis['best']
+    if best_df.empty:
+        print("Нет данных для графиков.")
+        return
+
+    branches = best_df['branch'].tolist()
+    fig = plt.figure(figsize=(16, 12))
+
+    # 1. Столбцы
+    ax1 = fig.add_subplot(2, 2, 1)
+    x = np.arange(len(branches))
+    width = 0.35
+    ax1.bar(x - width/2, best_df['weekly_cost']/1000, width, label='Недельный ФОТ (тыс.руб)')
+    ax1_twin = ax1.twinx()
+    ax1_twin.bar(x + width/2, best_df['avg_wait_min'], width, color='red',
+                 label='Среднее время ожидания (мин)')
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(branches)
+    ax1.set_ylabel('ФОТ, тыс. руб')
+    ax1_twin.set_ylabel('Среднее ожидание, мин')
+    # Легенда под графиком
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax1_twin.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc='lower center',
+               bbox_to_anchor=(0.5, -0.25), ncol=2)
+    ax1.set_title('Лучшие составы по отделениям')
+    ax1.grid(axis='y', linestyle='--', alpha=0.7)
+
+    # 2. Таблица лучших составов
+    table_data = []
+    for _, row in best_df.iterrows():
+        table_data.append([
+            row['branch'],
+            f"{int(row['junior'])} / {int(row['middle'])} / {int(row['senior'])}",
+            f"{row['weekly_cost']:,.0f}",
+            f"{row['avg_wait_min']:.1f}",
+            f"{row['total_shortfall']:.0f}"
+        ])
+    columns = ['Отделение', 'Junior / Middle / Senior',
+               'ФОТ, руб/нед', 'Среднее ожидание, мин', 'Недобор, окно-ч']
+    ax_table = fig.add_subplot(2, 2, 2)
+    ax_table.axis('off')
+    table = ax_table.table(cellText=table_data, colLabels=columns,
+                           cellLoc='center', loc='center',
+                           colWidths=[0.12, 0.25, 0.18, 0.22, 0.18])
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    ax_table.set_title('Лучшие найденные составы', fontsize=12, pad=20)
+
+    # 3. Парето-фронты для каждого отделения
+    pareto_dict = analysis['pareto']
+    for i, bid in enumerate(branches):
+        ax = fig.add_subplot(2, 2, i+3)
+        df = pareto_dict[bid]
+        ax.scatter(df['weekly_cost']/1000, df['avg_wait_min'],
+                   c='steelblue', s=50, label='Парето-оптимальные составы')
+        for _, row in df.iterrows():
+            ax.annotate(f"({int(row['junior'])}, {int(row['middle'])}, {int(row['senior'])})",
+                        (row['weekly_cost']/1000, row['avg_wait_min']),
+                        textcoords="offset points", xytext=(5,5), fontsize=7)
+        ax.set_xlabel('Недельный ФОТ, тыс. руб.')
+        ax.set_ylabel('Среднее время ожидания, мин')
+        ax.set_title(f'{bid} – лучшие варианты')
+        ax.legend()
+        ax.grid(True, linestyle='--', alpha=0.7)
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=150)
+        print(f"Сводный отчёт сохранён: {save_path}")
+    else:
+        plt.show()
+
+
+def save_report_files(analysis: Dict, output_dir: str) -> None:
+    """Сохраняет все отчётные файлы, включая детальные плоты для каждого отделения."""
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    best_df = analysis['best']
+    best_df.to_csv(f"{output_dir}/best_compositions.csv", index=False)
+
+    for bid, df in analysis['pareto'].items():
+        df.to_csv(f"{output_dir}/pareto_{bid}.csv", index=False)
+    for bid, df in analysis['full'].items():
+        df.to_csv(f"{output_dir}/all_variants_{bid}.csv", index=False)
+
+    # Детальные графики для каждого отделения
+    full_dict = analysis['full']
+    pareto_dict = analysis['pareto']
+    best_dict = {bid: (analysis['best'][analysis['best']['branch'] == bid].iloc[0]
+                       if not analysis['best'].empty and bid in analysis['best']['branch'].values
+                       else None)
+                 for bid in full_dict}
+
+    for bid in full_dict:
+        branch_res = {
+            'all': full_dict[bid],
+            'pareto': pareto_dict[bid],
+            'best': None
+        }
+        if best_dict[bid] is not None:
+            row = best_dict[bid]
+            branch_res['best'] = (int(row['junior']), int(row['middle']), int(row['senior']),
+                                  row['weekly_cost'], row['avg_wait_min'], row['total_shortfall'])
+        plot_branch_detail(bid, branch_res,
+                           save_path=f"{output_dir}/detail_{bid}.png")
+
+    plot_comparative_report(analysis, save_path=f"{output_dir}/comparative_report.png")
+
+    json_str = generate_json_report(analysis)
+    with open(f"{output_dir}/report.json", 'w', encoding='utf-8') as f:
+        f.write(json_str)
+
+    print(f"Все файлы отчёта сохранены в {output_dir}")
+
+
+def generate_json_report(analysis: Dict) -> str:
+    """Генерирует JSON-строку с полными результатами."""
+    best_df = analysis['best']
+    report = {
+        'best_compositions': best_df.to_dict(orient='records'),
+        'pareto_fronts': {
+            bid: df.to_dict(orient='records')
+            for bid, df in analysis['pareto'].items()
+        },
+        'all_variants': {
+            bid: df.to_dict(orient='records')
+            for bid, df in analysis['full'].items()
+        }
+    }
+    return json.dumps(report, indent=2, ensure_ascii=False, default=str)
+
+
+# ----------------------------------------------------------------------
+# Запуск
+# ----------------------------------------------------------------------
+if __name__ == '__main__':
+    ca = pd.read_csv('dataset/client_arrivals.csv')
+    ops = pd.read_csv('dataset/operations.csv')
+    br = pd.read_csv('dataset/branches.csv').set_index('branch_id')
+
+    all_results = {}
+    for bid in ['BR01', 'BR02', 'BR03']:
+        print(f"\n===== Оптимизация штата для {bid} =====")
+        res = optimize_staff_for_branch(
+            ca, ops, br, bid,
+            max_junior=5, max_middle=5, max_senior=4,
+            target_wait=10.0, verbose=True
+        )
+        all_results[bid] = res
+        if res['best'] is not None:
+            j, m, s, cost, wait, sf = res['best']
+            print(f"Лучший состав: junior={j}, middle={m}, senior={s}")
+            print(f"  Недельный ФОТ: {cost:,.0f} руб.")
+            print(f"  Среднее время ожидания: {wait:.1f} мин")
+            print(f"  Недобор окон: {sf:.1f} окно-часов")
+            print("\nВсе допустимые варианты:")
+            display_df = res['all'].rename(columns={
+                'junior': 'junior', 'middle': 'middle', 'senior': 'senior',
+                'weekly_cost': 'ФОТ/нед', 'avg_wait_min': 'Ожидание, мин',
+                'total_shortfall': 'Недобор, окно-ч'
+            })
+            print(display_df.to_string(index=False))
+        else:
+            print("Не найдено допустимых вариантов. "
+                  "Возможные причины: слишком жёсткий порог ожидания или недостаточный диапазон перебора.")
+
+    # Анализ и сохранение отчётов
+    analysis = analyze_optimization_results(all_results)
+    if not analysis['best'].empty:
+        save_report_files(analysis, str(OPTIMIZE_STAFF_REPORT_SAVE_DIRECTORY))
+        plot_comparative_report(analysis)   # показать на экране
+    else:
+        print("Нет данных для построения отчётов.")
+```
+```queue_simulation.py
+"""
+queue_simulation.py
+====================
+Дискретно-событийная симуляция системы массового обслуживания (M/M/c) на
+SimPy — независимая альтернатива аналитической формуле Эрланга C
+(required_windows.erlang_c_wait_minutes), реализующая must-have пункт
+брифа: "Реализовать симуляцию... клиенты приходят -> встают в очередь ->
+обслуживаются у свободного окна -> уходят".
+
+Три сценария использования:
+    1. simulate_mmc — базовая валидация: постоянные λ/μ/c, сравнение
+    среднего ожидания в симуляции с формулой Эрланга C (должны совпадать
+    с точностью до статистического шума — см. __main__ ниже).
+    2. simulate_day_continuous — реалистичная симуляция целого рабочего
+    дня с меняющейся по часам нагрузкой; очередь НЕ сбрасывается на
+    границе часа (в отличие от почасовой формулы Эрланга C, которая
+    предполагает, что нагрузка каждого часа держится бесконечно).
+    Показывает, что почасовая формула может как завышать, так и
+    занижать реальное ожидание — см. раздел 3.3 отчёта.
+    3. empirical_service_sampler — проверка допущения об экспоненциальном
+    времени обслуживания: позволяет прогнать симуляцию с РЕАЛЬНЫМ
+    эмпирическим распределением длительности операций вместо экспоненты.
+"""
+from typing import Callable, Optional
+import simpy
+import numpy as np
+import pandas as pd
+import json
+import matplotlib.pyplot as plt
+from compare_policies import naive_schedule
+
+from required_windows import erlang_c_wait_minutes, required_windows_table
+from schedule_ilp import schedule_day_ilp_soft, schedule_week_ilp
+from schedule_greedy import schedule_day as schedule_day_greedy, schedule_week as schedule_week_greedy
+from compare_policies import (
+    coverage_from_assignments,
+    avg_wait_for_coverage,
+    get_weekly_metrics,
+    plot_daily_schedule,
+    plot_weekly_schedule,
+    weekly_schedule_to_json,
+)
+from config import WEEKDAY_HOURS, SIM_REPORT_SAVE_DIRECTORY
+
+
+# ----------------------------------------------------------------------
+# 1. Базовые симуляции
+# ----------------------------------------------------------------------
+def simulate_mmc(lam_per_hour: float, mu_per_hour: float, c: int, sim_hours: float = 200,
+                warmup_hours: float = 20, seed: Optional[int] = None,
+                service_sampler: Optional[Callable] = None) -> np.ndarray:
+    """
+    Прогоняет одну непрерывную симуляцию M/M/c с ПОСТОЯННЫМИ λ/μ/c в
+    течение sim_hours часов и возвращает времена ожидания клиентов.
+
+    Используется как базовая валидация: при достаточно большом sim_hours
+    среднее время ожидания в выборке должно сходиться к аналитическому
+    значению erlang_c_wait_minutes(lam_per_hour, mu_per_hour, c) — если нет,
+    в реализации (симуляции или формулы) есть ошибка.
+
+    Args:
+        lam_per_hour: интенсивность входящего потока, клиентов/час.
+        mu_per_hour: интенсивность обслуживания одним окном, клиентов/час.
+        c: число обслуживающих окон.
+        sim_hours: длительность симуляции в модельных часах. Чем ближе
+            ρ=λ/(c·μ) к 1, тем больше нужно sim_hours для сходимости
+            (дисперсия оценки резко растёт при ρ→1).
+        warmup_hours: сколько начальных часов отбросить перед сбором
+            статистики — убирает смещение от пустого старта очереди
+            (при t=0 система гарантированно недогружена относительно
+            стационарного режима).
+        seed: сид генератора случайных чисел, для воспроизводимости.
+        service_sampler: функция(rng) -> время обслуживания В ЧАСАХ.
+            По умолчанию — экспонента со средним 1/mu_per_hour (стандартное
+            допущение M/M/c). Можно передать иной семплер (см.
+            empirical_service_sampler) для проверки чувствительности к
+            форме распределения времени обслуживания.
+
+    Returns:
+        1D numpy-массив времён ожидания в МИНУТАХ, по одному элементу на
+        каждого клиента, пришедшего после warmup_hours.
+    """
+    rng = np.random.default_rng(seed)
+    if service_sampler is None:
+        service_sampler = lambda rng: rng.exponential(1.0 / mu_per_hour)
+
+    env = simpy.Environment()
+    windows = simpy.Resource(env, capacity=c)
+    wait_times = []
+
+    def customer(env, arrival_time):
+        """Один клиент: встаёт в очередь на окно, ждёт, обслуживается, уходит."""
+        with windows.request() as req:
+            t0 = env.now
+            yield req  # блокируется здесь, пока не освободится окно
+            wait = env.now - t0
+            if arrival_time >= warmup_hours:
+                wait_times.append(wait * 60)  # переводим в минуты для итогового результата
+            yield env.timeout(service_sampler(rng))
+
+    def arrival_process(env):
+        """Генерирует пуассоновский поток клиентов через экспоненциальные интервалы между приходами."""
+        while True:
+            interarrival = rng.exponential(1.0 / lam_per_hour)
+            yield env.timeout(interarrival)
+            if env.now >= sim_hours:
+                break
+            env.process(customer(env, env.now))
+
+    env.process(arrival_process(env))
+    env.run(until=sim_hours)
+    return np.array(wait_times)
+
+
+def simulate_day_continuous(hour_profile: dict, mu_profile: dict, c_profile: dict,
+                            sim_days: int = 40, warmup_days: int = 5,
+                            seed: Optional[int] = None,
+                            service_sampler: Optional[Callable] = None) -> pd.DataFrame:
+    """
+    Симулирует МНОГО повторов одного рабочего дня с меняющейся по часам
+    нагрузкой λ(t)/μ(t)/c(t) — очередь НЕ сбрасывается на границе часа
+    внутри дня (перенос переполнения из часа в час учитывается), но
+    сбрасывается между "днями" (каждый день — новая simpy.Environment,
+    т.к. отделение реально закрывается на ночь и открывается заново с
+    пустой очередью).
+
+    Это ключевое отличие от почасовой формулы Эрланга C, которая
+    предполагает, что нагрузка каждого часа держится БЕСКОНЕЧНО (стационарный
+    режим) — здесь же час длится ровно 60 минут, и то, успела ли очередь
+    "разогнаться" или "рассосаться" за это время, зависит от того, что было
+    в предыдущие часы того же дня. См. раздел 3.3 отчёта: почасовая формула
+    может как завышать реальное ожидание (короткий всплеск ρ>=1 не успевает
+    достичь теоретического стационара), так и занижать его (очередь,
+    скопившаяся в пиковый час, перетекает в следующий, более спокойный).
+
+    Техническая деталь реализации: SimPy 4 не позволяет менять
+    Resource.capacity на лету (это свойство только для чтения), поэтому
+    вместимость окон варьируется по часам через приём "блокировки лишних
+    слотов" — Resource создаётся с capacity=max(c_profile), а разница
+    (max_c - c_profile[h]) удерживается фиктивными "блокирующими" заявками
+    в течение соответствующего часа (см. blocker_proc внутри).
+
+    Args:
+        hour_profile: dict {hour: lambda_per_hour} — интенсивность потока
+            по часам (обычно из required_windows_table).
+        mu_profile: dict {hour: mu_per_hour} — интенсивность обслуживания
+            по часам (может отличаться по часам, если микс типов операций
+            меняется в течение дня).
+        c_profile: dict {hour: c} — фактическое число открытых окон по
+            часам (например, достигнутое покрытие из ILP/жадного расписания).
+            Все три словаря должны иметь одинаковый набор ключей (часов).
+        sim_days: сколько "дней" симулировать — чем больше, тем точнее
+            оценка среднего (особенно для часов с высокой загрузкой, где
+            дисперсия ожидания велика).
+        warmup_days: сколько первых дней отбросить (на случай, если внутри
+            дня тоже есть небольшой разгон в первые "дни" сходимости —
+            обычно не критично при дневном сбросе очереди, но оставлено для
+            симметрии с warmup_hours в simulate_mmc).
+        seed: сид генератора случайных чисел (базовый — для дня i
+            используется seed*10_000 + i, чтобы дни были независимы, но
+            воспроизводимы).
+        service_sampler: функция(rng, mu) -> время обслуживания В ЧАСАХ.
+            По умолчанию — экспонента со средним 1/mu.
+
+    Returns:
+        DataFrame со столбцами day, hour, wait_min — по одной строке на
+        каждого обслуженного клиента (после warmup_days). Группировка
+        df.groupby('hour')['wait_min'].mean() даёт среднее реальное
+        ожидание по каждому часу дня.
+    """
+    hours_sorted = sorted(hour_profile.keys())
+    n_hours = len(hours_sorted)
+    if service_sampler is None:
+        service_sampler = lambda rng, mu: rng.exponential(1.0 / mu)
+
+    records = []
+    eps = 1e-6  # малый технический сдвиг для избежания гонки событий на границах часа (см. blocker_proc)
+
+    for day in range(sim_days):
+        rng = np.random.default_rng(None if seed is None else seed * 10_000 + day)
+        env = simpy.Environment()
+        max_c = max(c_profile.values())
+        windows = simpy.Resource(env, capacity=max_c)
+
+        # Список ожидающих (ещё не получивших окно) — для учёта при закрытии
+        unfinished = []
+
+        def blocker_proc(env, start_t, end_t, n_block):
+            """
+            Держит n_block "фиктивных" слотов занятыми в течение
+            [start_t, end_t], чтобы эффективная (доступная клиентам)
+            вместимость окон в этот час была меньше max_c — стандартный
+            приём для эмуляции time-varying capacity в SimPy (Resource.capacity
+            в SimPy 4 доступен только на чтение, изменить его напрямую нельзя).
+            Небольшие сдвиги на eps в начале/конце нужны, чтобы блокер
+            текущего часа гарантированно занял слоты ПОСЛЕ того, как блокер
+            предыдущего часа их освободил (иначе возможна гонка событий
+            ровно в момент границы часа).
+            """
+            if n_block <= 0:
+                return
+            yield env.timeout(start_t + eps)
+            reqs = [windows.request() for _ in range(n_block)]
+            for r in reqs:
+                yield r
+            yield env.timeout((end_t - eps) - (start_t + eps))
+            for r in reqs:
+                windows.release(r)
+
+        # заранее планируем блокирующие процессы на весь день — каждый "просыпается"
+        # в свой час и держит нужное число слотов занятым до конца этого часа
+        for i, h in enumerate(hours_sorted):
+            n_block = max_c - c_profile[h]
+            env.process(blocker_proc(env, i, i + 1, n_block))
+
+        def customer(env, hour_idx, mu):
+            """Один клиент: встаёт в очередь на окно, ждёт, обслуживается, уходит."""
+            arrival = env.now
+            info = {'arrival': arrival, 'hour_idx': hour_idx}
+            unfinished.append(info)               # добавили в список ожидающих
+            with windows.request() as req:
+                t0 = env.now
+                yield req
+                # Окно получено — удаляемся из ожидающих
+                if info in unfinished:
+                    unfinished.remove(info)
+                wait = env.now - t0
+                if day >= warmup_days:
+                    records.append((day, hours_sorted[hour_idx], wait * 60))
+                yield env.timeout(service_sampler(rng, mu))
+
+        def arrivals(env):
+            """
+            Генерирует приходы клиентов час за часом. Внутри часа число
+            приходов ~ Poisson(λ), а их позиции равномерно разбросаны по
+            часу — это стандартный и точный способ смоделировать процесс с
+            кусочно-постоянной интенсивностью (эквивалентно пуассоновскому
+            процессу, условленному на число точек в и��тервале), без
+            смещения, которое возникло бы при наивном "дотягивании"
+            экспоненциальных интервалов через границу часа.
+            """
+            for i, h in enumerate(hours_sorted):
+                lam = hour_profile[h]
+                mu = mu_profile[h]
+                if lam > 0:
+                    n = rng.poisson(lam)
+                    offsets = np.sort(rng.uniform(2 * eps, 1 - 2 * eps, size=n))
+                    prev = 0.0
+                    for off in offsets:
+                        yield env.timeout(off - prev)
+                        prev = off
+                        env.process(customer(env, i, mu))
+                    yield env.timeout(1.0 - prev)
+                else:
+                    yield env.timeout(1.0)
+
+        env.process(arrivals(env))
+        env.run(until=n_hours)
+
+        # Учитываем клиентов, которые не успели обслужиться до закрытия
+        for info in unfinished:
+            wait = n_hours - info['arrival']
+            if day >= warmup_days:
+                records.append((day, hours_sorted[info['hour_idx']], wait * 60))
+
+    return pd.DataFrame(records, columns=['day', 'hour', 'wait_min'])
+
+
+def empirical_service_sampler(operation_mix: list, rng_seed_offset: int = 0) -> Callable:
+    """
+    Строит семплер времени обслуживания на основе РЕАЛЬНЫХ эмпирических
+    данных вместо экспоненциального распределения — для проверки, насколько
+    чувствителен результат к допущению об экспоненциальности времени
+    обслуживания (одно из двух ключевых допущений M/M/c наряду с
+    пуассоновским входом).
+
+    С вероятностью, пропорциональной весу типа операции, выбирается пул
+    (basic/credit/mortgage), а затем время обслуживания берётся случайным
+    бутстрэп-сэмплом из РЕАЛЬНО НАБЛЮДАВШИХСЯ значений этого типа (не из
+    сглаженного распределения) — максимально честная проверка.
+
+    Args:
+        operation_mix: список пар (вес, массив_наблюдаемых_времён_в_минутах)
+            — например [(0.69, basic_times), (0.26, credit_times),
+            (0.05, mortgage_times)], где веса — доли каждого типа операции
+            в общем потоке (нормализуются внутри функции, суммировать в 1
+            не обязательно).
+        rng_seed_offset: зарезервировано для будущего использования
+            (независимая случайность семплера относительно потока приходов);
+            сейчас сэмплер использует тот же rng, что передаётся при вызове.
+
+    Returns:
+        Функция sampler(rng, mu_unused=None) -> время обслуживания В ЧАСАХ,
+        совместимая по сигнатуре с параметром service_sampler в
+        simulate_mmc / simulate_day_continuous (аргумент mu_unused
+        игнорируется — оставлен только для единообразия сигнатуры с
+        экспоненциальным семплером по умолчанию, который использует mu).
+    """
+    weights = np.array([w for w, _ in operation_mix])
+    weights = weights / weights.sum()
+    pools = [arr for _, arr in operation_mix]
+
+    def sampler(rng, mu_unused=None):
+        idx = rng.choice(len(pools), p=weights)
+        val_min = rng.choice(pools[idx])
+        return val_min / 60.0
+
+    return sampler
+
+
+# ----------------------------------------------------------------------
+# 2. Сводные графики (трёхпанельные)
+# ----------------------------------------------------------------------
+def _plot_daily_validation_summary(assignments: list, comparison: pd.DataFrame,
+                                   title: str, save_path: str) -> None:
+    """
+    Три панели на одном рисунке:
+    (1) аналитика (линии с маркерами): Целевой, Старое, Новое,
+    (2) загрузка сотрудников,
+    (3) симуляция: Старое vs Новое.
+    """
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+    cap = 90.0
+
+    # ---------- Панель 1: Аналитика (линии с маркерами) ----------
+    ax = axes[0]
+    hours = comparison['hour'].values
+    target = np.minimum(comparison['erlang_required_wait_min'].values, cap)
+    old_erl = np.minimum(comparison['old_erlang_wait_min'].values, cap)
+    new_erl = np.minimum(comparison['erlang_wait_min'].values, cap)
+
+    ax.plot(hours, target, '^-', color='green', markersize=8, label='Целевой (R_total)')
+    ax.plot(hours, old_erl, 's-', color='gray', markersize=8, label='Старое расписание (9ч)')
+    ax.plot(hours, new_erl, 'o-', color='steelblue', markersize=8, label='Новое расписание')
+    ax.set_title('Аналитика (Эрланг C)')
+    ax.set_xlabel('Час')
+    ax.set_ylabel('Ожидание, мин')
+    ax.set_xticks(hours)
+    ax.set_yticks(np.arange(0, cap+10, 10))
+    ax.legend()
+    ax.grid(True, linestyle='--', alpha=0.7)
+
+    # ---------- Панель 2: Загрузка сотрудников ----------
+    ax = axes[1]
+    if assignments:
+        df = pd.DataFrame(assignments)
+        emp_hours = df.groupby('employee_id')['paid_hours'].sum().sort_values(ascending=False)
+        default_hours = pd.Series(9.0, index=emp_hours.index)
+        x = np.arange(len(emp_hours))
+        width = 0.35
+        ax.bar(x - width/2, default_hours, width, color='lightgray', label='По умолчанию (9 ч)')
+        ax.bar(x + width/2, emp_hours, width, color='skyblue', label='По расписанию')
+        ax.set_xticks(x)
+        ax.set_xticklabels(emp_hours.index, rotation=45, ha='right')
+        ax.set_title('Отработано часов')
+        ax.set_ylabel('Часы')
+        ax.legend()
+        ax.grid(axis='y', linestyle='--', alpha=0.7)
+    else:
+        ax.text(0.5, 0.5, 'Нет данных', transform=ax.transAxes, ha='center')
+
+    # ---------- Панель 3: Симуляция (столбцы) ----------
+    ax = axes[2]
+    hours = comparison['hour'].values
+    x = np.arange(len(hours))
+    width = 0.35
+    old_sim = np.minimum(comparison['old_sim_wait_min'].values, cap)
+    new_sim = np.minimum(comparison['sim_wait_min'].values, cap)
+
+    ax.bar(x - width/2, old_sim, width, color='gray', label='Старое расписание (симуляция)')
+    ax.bar(x + width/2, new_sim, width, color='salmon', label='Новое расписание (симуляция)')
+    ax.set_title('Симуляция очереди')
+    ax.set_xlabel('Час')
+    ax.set_ylabel('Ожидание, мин')
+    ax.set_xticks(x)
+    ax.set_xticklabels(hours)
+    ax.set_yticks(np.arange(0, cap+10, 10))
+    ax.legend()
+    ax.grid(axis='y', linestyle='--', alpha=0.7)
+
+    fig.suptitle(title, fontsize=14)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    print(f"Сводный дневной отчёт сохранён: {save_path}")
+
+
+
+
+def _plot_weekly_validation_summary(comparison_week: dict, results_week: dict,
+                                    summary_week: pd.DataFrame,
+                                    title: str, save_path: str) -> None:
+    """
+    Три панели:
+    (1) ожидание по дням (аналитика vs симуляция),
+    (2) покрытие первого дня,
+    (3) загрузка сотрудников за неделю.
+    """
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+
+    # (1) Сравнение ожидания по дням
+    ax = axes[0]
+    weekdays = comparison_week['weekdays']
+    x = np.arange(len(weekdays))
+    width = 0.35
+    ax.bar(x - width/2, comparison_week['daily_analytic'], width, label='Аналитика')
+    ax.bar(x + width/2, comparison_week['daily_sim'], width, label='Симуляция')
+    ax.set_xticks(x)
+    ax.set_xticklabels(weekdays)
+    ax.set_ylabel('Среднее ожидание, мин')
+    ax.set_title('Ожидание по дням')
+    ax.legend()
+    ax.grid(axis='y', linestyle='--', alpha=0.7)
+
+    # (2) Покрытие первого дня
+    ax = axes[1]
+    first_day = list(results_week.keys())[0]
+    cov_df = results_week[first_day]['coverage']
+    hours = cov_df['hour']
+    ax.plot(hours, cov_df['R_total'], 'o-', markersize=8, label='Требуется')
+    ax.plot(hours, cov_df['cov_total'], 's-', markersize=8, label='Открыто')
+    ax.set_title(f'Покрытие ({first_day})')
+    ax.set_xlabel('Час')
+    ax.set_ylabel('Окна')
+    ax.legend()
+    ax.grid(True)
+
+    # (3) Загрузка сотрудников
+    ax = axes[2]
+    employees = summary_week['employee_id'].tolist()
+    utilization = (summary_week['utilization'] * 100).tolist()
+    ax.barh(employees, utilization, color='salmon')
+    ax.set_title('Загрузка сотрудников (%)')
+    ax.set_xlabel('% от 40ч')
+
+    fig.suptitle(title, fontsize=14)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    print(f"Сводный недельный отчёт сохранён: {save_path}")
+
+
+# ----------------------------------------------------------------------
+# 3. Валидация одного дня с сохранением артефактов
+# ----------------------------------------------------------------------
+def validate_schedule_with_simulation(
+    client_arrivals: pd.DataFrame,
+    operations: pd.DataFrame,
+    branches: pd.DataFrame,
+    employees: pd.DataFrame,
+    branch_id: str,
+    weekday_en: str,
+    n_windows_max: int = None,
+    sim_days: int = 100,
+    warmup_days: int = 10,
+    seed: int = 42,
+    service_sampler: Optional[Callable] = None,
+    algorithm: str = 'ilp'   # 'ilp' или 'greedy'
+) -> dict:
+    """
+    Строит расписание (ILP или Greedy), сохраняет профили, метрики и
+    графики в папку SIM_REPORT_SAVE_DIRECTORY. Возвращает словарь с результатами.
+
+    Args:
+        ...
+        algorithm: 'ilp' или 'greedy'
+
+    Returns:
+        Словарь с ключами:
+        - 'comparison': DataFrame сравнения аналитики и симуляции по часам.
+        - 'assignments': список назначений.
+        - 'report_dir': путь к папке с сохранёнными файлами.
+        - 'files': словарь с путями к отдельным файлам.
+    """
+    if n_windows_max is None:
+        n_windows_max = int(branches.loc[branch_id, 'n_windows'])
+
+    req = required_windows_table(client_arrivals, operations, branch_id, weekday_en, n_windows_max)
+    branch_emp = employees[employees['branch_id'] == branch_id]
+    open_h, close_h = WEEKDAY_HOURS[weekday_en]
+
+    if algorithm == 'ilp':
+        assignments, coverage_df, _, _, shortfall = schedule_day_ilp_soft(branch_emp, req, open_h, close_h, n_windows_max)
+    else:
+        assignments, coverage_df, _, _ = schedule_day_greedy(branch_emp, req, open_h, close_h, n_windows_max=n_windows_max)
+        shortfall = None
+
+    hours = list(req['hour'])
+    lam_profile = dict(zip(req['hour'], req['lambda_total']))
+    mu_profile = {h: 60.0 / req.set_index('hour').loc[h, 'avg_service_min'] for h in hours}
+    c_profile = dict(zip(coverage_df['hour'], coverage_df['cov_total']))
+
+    sim_df = simulate_day_continuous(lam_profile, mu_profile, c_profile,
+                                    sim_days=sim_days, warmup_days=warmup_days, seed=seed,
+                                    service_sampler=service_sampler)
+    sim_by_hour = sim_df.groupby('hour')['wait_min'].mean()
+
+    analytic_waits = {}
+    for h in hours:
+        wq = erlang_c_wait_minutes(lam_profile[h], mu_profile[h], c_profile[h])
+        analytic_waits[h] = wq if np.isfinite(wq) else np.inf
+
+    comparison = pd.DataFrame({
+        'hour': hours,
+        'lambda': [lam_profile[h] for h in hours],
+        'mu': [mu_profile[h] for h in hours],
+        'c': [c_profile[h] for h in hours],
+        'erlang_wait_min': [analytic_waits[h] for h in hours],
+        'sim_wait_min': [sim_by_hour.get(h, 0) for h in hours]
+    })
+    req_r_total = dict(zip(req['hour'], req['R_total']))
+    erlang_required = {}
+    for h in hours:
+        wq = erlang_c_wait_minutes(lam_profile[h], mu_profile[h], req_r_total[h])
+        erlang_required[h] = wq if np.isfinite(wq) else np.inf
+    comparison['erlang_required_wait_min'] = [erlang_required[h] for h in hours]
+    # ---------- Старое (9‑часовое) расписание ----------
+    old_assignments = naive_schedule(branch_emp, n_windows_max, open_h)
+    # покрытие старого расписания
+    old_c_profile = coverage_from_assignments(old_assignments, hours)
+    old_c_profile = {h: old_c_profile[h] for h in hours}
+
+    # Аналитика по старому расписанию
+    old_analytic = {}
+    for h in hours:
+        wq = erlang_c_wait_minutes(lam_profile[h], mu_profile[h], old_c_profile[h])
+        old_analytic[h] = wq if np.isfinite(wq) else np.inf
+
+    # Симуляция для старого расписания
+    old_sim_df = simulate_day_continuous(lam_profile, mu_profile, old_c_profile,
+                                        sim_days=sim_days, warmup_days=warmup_days, seed=seed,
+                                        service_sampler=service_sampler)
+    old_sim_by_hour = old_sim_df.groupby('hour')['wait_min'].mean()
+
+    # Добавляем в comparison
+    comparison['old_erlang_wait_min'] = [old_analytic[h] for h in hours]
+    comparison['old_sim_wait_min'] = [old_sim_by_hour.get(h, 0) for h in hours]
+
+
+    report_dir = SIM_REPORT_SAVE_DIRECTORY / f"{branch_id}_{weekday_en}_{algorithm}"
+    report_dir.mkdir(parents=True, exist_ok=True)
+
+    files = {}
+    # Профили
+    for name, data in [('lambda', lam_profile), ('mu', mu_profile), ('c', c_profile)]:
+        fpath = report_dir / f"{name}_profile.json"
+        with open(fpath, 'w') as f:
+            json.dump(data, f, indent=2)
+        files[name] = str(fpath)
+
+    # Сводный трёхпанельный отчёт (аналитика/симуляция + загрузка + ожидание)
+    summary_path = report_dir / 'daily_summary.png'
+    _plot_daily_validation_summary(assignments, comparison,
+                                title=f"{algorithm.upper()} {branch_id} {weekday_en}",
+                                save_path=str(summary_path))
+    files['daily_summary'] = str(summary_path)
+
+    # Файл расписания (ранее gantt.png)
+    schedule_path = report_dir / 'schedule.png'
+    plot_daily_schedule(assignments, title=f"{algorithm.upper()} {branch_id} {weekday_en}",
+                        save_path=str(schedule_path))
+    files['schedule'] = str(schedule_path)
+
+    # JSON-отчёт
+    report_json = {
+        'branch': branch_id,
+        'weekday': weekday_en,
+        'algorithm': algorithm,
+        'sim_days': sim_days,
+        'warmup_days': warmup_days,
+        'shortfall': shortfall,
+        'mean_erlang_wait': comparison['erlang_wait_min'].replace(np.inf, np.nan).mean(),
+        'mean_sim_wait': comparison['sim_wait_min'].mean(),
+        'hourly_data': comparison.to_dict(orient='records')
+    }
+    json_path = report_dir / 'report.json'
+    with open(json_path, 'w') as f:
+        json.dump(report_json, f, indent=2, default=str)
+    files['report_json'] = str(json_path)
+
+    return {
+        'comparison': comparison,
+        'assignments': assignments,
+        'report_dir': str(report_dir),
+        'files': files
+    }
+
+
+# ----------------------------------------------------------------------
+# 4. Недельная валидация
+# ----------------------------------------------------------------------
+def validate_week_schedule(
+    client_arrivals: pd.DataFrame,
+    operations: pd.DataFrame,
+    branches: pd.DataFrame,
+    employees: pd.DataFrame,
+    branch_id: str,
+    algorithm: str = 'ilp',
+    sim_days: int = 100,
+    warmup_days: int = 10,
+    seed: int = 42,
+    service_sampler: Optional[Callable] = None
+) -> dict:
+    """
+    Для каждого дня недели симулирует работу, собирает взвешенное ожидание,
+    сравнивает с аналитикой и строит графики + загрузку сотрудников.
+    Сохраняет детальный и сводный отчёты.
+    """
+    n_win = int(branches.loc[branch_id, 'n_windows'])
+    if algorithm == 'ilp':
+        results_week, summary_week = schedule_week_ilp(client_arrivals, operations, employees, branches, branch_id)
+    else:
+        results_week, summary_week = schedule_week_greedy(client_arrivals, operations, employees, branches, branch_id)
+
+    metrics_analytic = get_weekly_metrics(results_week, summary_week, client_arrivals, operations, branch_id, branches)
+
+    total_weight = 0.0
+    weighted_sim_wait = 0.0
+    daily_sim_waits = {}
+    for weekday, data in results_week.items():
+        assignments = data['assignments']
+        coverage_df = data['coverage']
+        req = required_windows_table(client_arrivals, operations, branch_id, weekday, n_win)
+        hours = list(req['hour'])
+        lam_profile = dict(zip(req['hour'], req['lambda_total']))
+        mu_profile = {h: 60.0 / req.set_index('hour').loc[h, 'avg_service_min'] for h in hours}
+        c_profile = dict(zip(coverage_df['hour'], coverage_df['cov_total']))
+
+        sim_df = simulate_day_continuous(lam_profile, mu_profile, c_profile,
+                                        sim_days=sim_days, warmup_days=warmup_days, seed=seed,
+                                        service_sampler=service_sampler)
+        sim_by_hour = sim_df.groupby('hour')['wait_min'].mean()
+        day_weight = req['lambda_total'].sum()
+        day_avg_wait = np.average([sim_by_hour.get(h, 0) for h in hours],
+                                weights=req['lambda_total'].values) if day_weight > 0 else 0.0
+        daily_sim_waits[weekday] = day_avg_wait
+        total_weight += day_weight
+        weighted_sim_wait += day_avg_wait * day_weight
+
+    week_sim_wait = weighted_sim_wait / total_weight if total_weight > 0 else 0.0
+
+    comparison_week = {
+        'branch': branch_id,
+        'algorithm': algorithm,
+        'analytic_weekly_wait': metrics_analytic['avg_wait_weighted'],
+        'sim_weekly_wait': round(week_sim_wait, 2),
+        'daily_analytic': [m['avg_wait'] for m in metrics_analytic['daily_metrics']],
+        'daily_sim': [daily_sim_waits[m['weekday']] for m in metrics_analytic['daily_metrics']],
+        'weekdays': [m['weekday'] for m in metrics_analytic['daily_metrics']]
+    }
+
+    report_dir = SIM_REPORT_SAVE_DIRECTORY / f"{branch_id}_week_{algorithm}"
+    report_dir.mkdir(parents=True, exist_ok=True)
+
+    # Детальный недельный отчёт (plot_weekly_schedule из compare_policies)
+    plot_weekly_schedule(results_week, summary_week, client_arrivals, operations, branch_id, branches,
+                        save_path=str(report_dir / 'weekly_summary.png'))
+
+    # Сводный трёхпанельный отчёт по неделе
+    _plot_weekly_validation_summary(comparison_week, results_week, summary_week,
+                                    title=f"Week {branch_id} {algorithm.upper()}",
+                                    save_path=str(report_dir / 'weekly_validation_summary.png'))
+
+    # JSON-отчёт
+    json_path = report_dir / 'week_validation.json'
+    with open(json_path, 'w') as f:
+        json.dump(comparison_week, f, indent=2, default=str)
+
+    print(f"Недельная валидация сохранена в {report_dir}")
+    return {
+        'comparison': comparison_week,
+        'report_dir': str(report_dir)
+    }
+
+
+# ----------------------------------------------------------------------
+# 5. Главный запуск – полная валидация всех отделений, дней, алгоритмов
+# ----------------------------------------------------------------------
+if __name__ == '__main__':
+    ca = pd.read_csv('dataset/client_arrivals.csv')
+    ops = pd.read_csv('dataset/operations.csv')
+    br = pd.read_csv('dataset/branches.csv').set_index('branch_id')
+    emp = pd.read_csv('dataset/employees.csv')
+    emp['skills'] = emp['skills'].str.split(',')
+
+    # Для каждого отделения и каждого алгоритма
+    for branch in ['BR01', 'BR02', 'BR03']:
+        for alg in ['ilp', 'greedy']:
+            # Симуляция всех рабочих дней
+            for day in WEEKDAY_HOURS:
+                print(f"=== {branch} {day} {alg} ===")
+                validate_schedule_with_simulation(ca, ops, br, emp, branch, day,
+                                                algorithm=alg, sim_days=80, warmup_days=10)
+            # Симуляция недели
+            print(f"=== Неделя {branch} {alg} ===")
+            validate_week_schedule(ca, ops, br, emp, branch, algorithm=alg, sim_days=80, warmup_days=10)
+
+    # Базовая валидация формулы Эрланга
+    print("\n=== Базовая валидация Эрланга C ===")
+    c, mu = 4, 6.0
+    for rho in [0.3, 0.5, 0.7, 0.85, 0.95]:
+        lam = rho * c * mu
+        analytic = erlang_c_wait_minutes(lam, mu, c)
+        sim = simulate_mmc(lam, mu, c, sim_hours=1500, warmup_hours=100, seed=42).mean()
+        print(f"  rho={rho:.2f}  Эрланг C={analytic:7.2f} мин  Симуляция={sim:7.2f} мин")
+```
+```required_windows.py
+"""
+required_windows.py
+====================
+Оценка требуемого числа открытых окон обслуживания по часам.
+
+Пайплайн модуля:
+    1. Оценить интенсивность потока λ(час, день недели) по историческим данным
+       (MLE-оценка параметра пуассоновского процесса — среднее число клиентов
+       в данном часовом слоте по наблюдаемым неделям).
+    2. Через формулу Эрланга C (аналитическая модель очереди M/M/c) найти
+       минимальное число окон c, при котором среднее время ожидания Wq не
+       превышает целевой порог (THRESHOLD_MIN).
+    3. Учесть иерархию навыков сотрудников (senior ⊃ credit ⊃ basic из
+       employees.csv): помимо общего требования R_total считаются под-
+       требования R_credit и R_mortgage — сколько из открытых окон обязаны
+       обслуживать сотрудники соответствующей квалификации.
+    4. Ограничить всё физическим числом окон отделения (n_windows_max из
+       branches.csv) и явно пометить часы, где порог недостижим даже на
+       максимуме окон (threshold_reachable=False) — это уже не проблема
+       расписания, а инфраструктурное ограничение отделения.
+
+Результат (required_windows_table) — вход для планировщиков расписания:
+    schedule_greedy.py (жадный алгоритм) и schedule_ilp.py (точный ILP).
+
+Независимая проверка модели очереди — дискретно-событийная симуляция в
+queue_simulation.py (сравнение с erlang_c_wait_minutes ниже).
+"""
+from typing import Tuple
+
+import pandas as pd
+import numpy as np
+import math
+
+THRESHOLD_MIN = 10          # целевой порог среднего времени ожидания, минут
+SERVICE_MIN = {              # средняя длительность обслуживания по уровню навыка, минут
+    'basic': 8.98,            # эмпирическое среднее по client_arrivals.csv (операции OP01-OP03)
+    'credit': 30.55,          # операции OP04-OP05 (кредит/рефинансирование)
+    'mortgage': 50.0,         # операция OP06 (ипотека, только senior)
+}
+
+
+def erlang_c_wait_minutes(lam_per_hour: float, mu_per_hour: float, c: int) -> float:
+    """
+    Среднее время ожидания в очереди Wq для системы массового обслуживания
+    M/M/c (формула Эрланга C), в минутах.
+
+    Модель: c идентичных обслуживающих окон, пуассоновский вход с
+    интенсивностью lam_per_hour, экспоненциальное время обслуживания со
+    средним 1/mu_per_hour. Формула предполагает СТАЦИОНАРНЫЙ режим — то
+    есть параметры считаются неизменными сколь угодно долго. Для часового
+    слота с быстро меняющейся нагрузкой это даёт консервативную (worst-case)
+    оценку — см. queue_simulation.py для проверки через реалистичную
+    непрерывную симуляцию дня, где нагрузка меняется по часам.
+
+    Args:
+        lam_per_hour: интенсивность входящего потока, клиентов/час.
+        mu_per_hour: интенсивность обслуживания одним окном, клиентов/час
+            (= 60 / среднее_время_обслуживания_в_минутах).
+        c: число открытых обслуживающих окон.
+
+    Returns:
+        Wq в минутах. math.inf, если система нестабильна (предложенная
+        нагрузка a = lam/mu >= c, т.е. окна физически не справляются с
+        потоком даже в теории).
+    """
+    if c <= 0:
+        return math.inf
+    a = lam_per_hour / mu_per_hour  # предлагаемая нагрузка в Эрлангах (offered load)
+    if c <= a:
+        return math.inf  # ρ = a/c >= 1 -> очередь растёт неограниченно
+    # Классическая формула Эрланга C: сначала считаем P0 (вероятность пустой
+    # системы), затем P_wait (вероятность, что клиент встанет в очередь, а не
+    # будет обслужен немедленно), затем Wq через среднее число ожидающих.
+    sum_terms = sum(a ** k / math.factorial(k) for k in range(c))
+    last_term = (a ** c / math.factorial(c)) * (c / (c - a))
+    p0 = 1.0 / (sum_terms + last_term)
+    p_wait = last_term * p0  # вероятность ожидания (собственно "формула Эрланга C")
+    wq_hours = p_wait / (c * mu_per_hour - lam_per_hour)
+    return wq_hours * 60
+
+
+def min_windows_erlang(lam_per_hour: float, avg_service_min: float,
+                        threshold_min: float = THRESHOLD_MIN, max_c: int = 20) -> int:
+    """
+    Подбирает минимальное число окон c, при котором Wq (формула Эрланга C)
+    не превышает threshold_min. Простой линейный перебор от минимально
+    стабильного c вверх — пространство поиска маленькое (обычно c < 10),
+    так что перебор быстрее и надёжнее любой аналитической инверсии формулы.
+
+    Args:
+        lam_per_hour: интенсивность входящего потока, клиентов/час.
+        avg_service_min: среднее время обслуживания, минут.
+        threshold_min: целевой порог среднего ожидания, минут.
+        max_c: верхний предел перебора (защита от бесконечного цикла и
+            от нереалистично больших ответов, если threshold_min слишком мал).
+
+    Returns:
+        Минимальное c, удовлетворяющее порогу. Если лямбда=0 — возвращает 0
+        (окна не нужны). Если порог недостижим даже при max_c окнах —
+        возвращает max_c (вызывающий код сам решает, что с этим делать;
+        required_windows_table дополнительно помечает такие часы флагом
+        threshold_reachable=False после сравнения с физическим потолком окон).
+    """
+    if lam_per_hour <= 0:
+        return 0
+    mu_per_hour = 60.0 / avg_service_min
+    a = lam_per_hour / mu_per_hour
+    c = max(1, math.ceil(a))  # стартуем с минимально стабильного c (иначе Wq=inf)
+    while c <= max_c:
+        wq = erlang_c_wait_minutes(lam_per_hour, mu_per_hour, c)
+        if wq <= threshold_min:
+            return c
+        c += 1
+    return max_c  # порог физически недостижим даже при максимуме окон
+
+
+def min_skill_servers(lam_skill_per_hour: float, avg_service_min: float,
+                    safety_buffer: int = 1, safety_trashold: float = 0.3) -> int:
+    """
+    Оценивает минимальное число серверов конкретной квалификации (credit
+    или mortgage), необходимое для под-потока клиентов этого типа.
+
+    Полноценная формула Эрланга C здесь плохо применима: лямбда под-потоков
+    часто маленькая (< 2 клиента/час), и Erlang C при таких значениях даёт
+    очень шумные, скачкообразные оценки. Вместо этого используем более
+    грубое, но устойчивое правило: минимум серверов, чтобы загрузка была
+    < 1 (иначе очередь по этому под-потоку растёт неограниченно), плюс
+    запас в safety_buffer окно(а) на пиковую изменчивость, если нагрузка (safety_trashold)
+    заметная (a > 0.3 Эрланга) — иначе буфер не добавляем, чтобы не
+    завышать требование на почти пустых часах.
+
+    Args:
+        lam_skill_per_hour: интенсивность под-потока (клиентов данного
+            типа операции), клиентов/час.
+        avg_service_min: среднее время обслуживания ЭТОГО типа операции,
+            минут (не общее среднее по отделению).
+        safety_buffer: сколько дополнительных окон закладывать сверх
+            минимально стабильного количества, если нагрузка заметная.
+
+    Returns:
+        Минимальное число окон нужной квалификации. 0, если под-потока нет.
+    """
+    if lam_skill_per_hour <= 0:
+        return 0
+    mu = 60.0 / avg_service_min
+    a = lam_skill_per_hour / mu
+    return math.ceil(a) + (safety_buffer if a > safety_trashold else 0)
+
+
+def required_windows_table(client_arrivals: pd.DataFrame, operations: pd.DataFrame,
+                            branch_id: str, weekday_en: str, n_windows_max: int) -> pd.DataFrame:
+    """
+    Строит по часам таблицу требуемого числа открытых окон для одного
+    отделения и одного дня недели — основной вход для планировщиков
+    расписания (schedule_greedy.schedule_day, schedule_ilp.schedule_day_ilp*).
+
+    Для каждого часа считает:
+    - lambda_total / lambda_credit / lambda_mortgage — интенсивность
+        общего потока и под-потоков, требующих credit+ и mortgage-навык
+        соответственно (credit+ включает mortgage — вложенность навыков
+        senior ⊃ credit ⊃ basic из employees.csv).
+    - R_total / R_credit / R_mortgage — минимальное число окон каждой
+        категории, с гарантией вложенности R_mortgage <= R_credit <= R_total
+        и жёстким потолком R_total <= n_windows_max (физическое число окон
+        отделения из branches.csv).
+    - Wq_at_cap_min / threshold_reachable — реальное ожидание и флаг
+        достижимости порога THRESHOLD_MIN, если открыть ВСЕ физически
+        доступные окна. False означает инфраструктурное ограничение
+        (не хватает окон), которое никаким расписанием не решить.
+
+    Args:
+        client_arrivals: датафрейм client_arrivals.csv (или эквивалент) со
+            столбцами arrival_datetime, branch_id, operation_id,
+            service_time_min.
+        operations: датафрейм operations.csv со столбцами operation_id,
+            required_skill.
+        branch_id: идентификатор отделения (например, 'BR01').
+        weekday_en: день недели на английском в формате pandas.day_name()
+            (например, 'Monday').
+        n_windows_max: физическое число окон отделения (branches.csv,
+            столбец n_windows).
+
+    Returns:
+        DataFrame, отсортированный по часу, со столбцами: hour, lambda_total,
+        lambda_credit, lambda_mortgage, avg_service_min, R_total, R_credit,
+        R_mortgage, Wq_at_cap_min, threshold_reachable.
+    """
+    ops = operations.set_index('operation_id')['required_skill']
+    ca = client_arrivals.copy()
+    ca['arrival_datetime'] = pd.to_datetime(ca['arrival_datetime'])
+    ca['weekday_en'] = ca['arrival_datetime'].dt.day_name()
+    ca['hour'] = ca['arrival_datetime'].dt.hour
+    ca['skill'] = ca['operation_id'].map(ops)
+
+    sub = ca[(ca['branch_id'] == branch_id) & (ca['weekday_en'] == weekday_en)]
+    n_weeks = sub['arrival_datetime'].dt.date.nunique()  # число наблюдаемых недель для усреднения (MLE лямбды)
+
+    rows = []
+    for hour, g in sub.groupby('hour'):
+        lam_total = len(g) / n_weeks
+        # credit+ включает mortgage: senior может делать всё, что и middle (вложенность навыков)
+        lam_credit = len(g[g['skill'].isin(['credit', 'mortgage'])]) / n_weeks
+        lam_mortgage = len(g[g['skill'] == 'mortgage']) / n_weeks
+        # эффективное среднее время обслуживания В ЭТОТ КОНКРЕТНЫЙ час (наблюдаемое
+        # по факту, а не общее среднее по отделению) — учитывает, что микс типов
+        # операций может отличаться по часам (например, больше кредитных консультаций
+        # в обед, когда у людей есть время)
+        avg_service = g['service_time_min'].mean()
+
+        r_total = min_windows_erlang(lam_total, avg_service)
+        r_credit = min_skill_servers(lam_credit, SERVICE_MIN['credit'])
+        r_mortgage = min_skill_servers(lam_mortgage, SERVICE_MIN['mortgage'])
+
+        # физический потолок окон в отделении — жёсткое ограничение сверху
+        r_total_capped = min(r_total, n_windows_max)
+        # гарантируем вложенность: под-требования не могут превышать общее
+        r_credit = min(r_credit, r_total_capped)
+        r_mortgage = min(r_mortgage, r_credit)
+
+        # если даже на физическом максимуме окон порог недостижим — считаем
+        # реальный Wq на этом максимуме, чтобы явно показать масштаб проблемы
+        # (а не просто "порог не достигнут", а "насколько именно не достигнут")
+        mu_total = 60.0 / avg_service if avg_service > 0 else np.nan
+        wq_at_cap = (erlang_c_wait_minutes(lam_total, mu_total, r_total_capped)
+                    if lam_total > 0 else 0.0)
+        reachable = wq_at_cap <= THRESHOLD_MIN
+
+        rows.append(dict(hour=hour, lambda_total=round(lam_total, 2), lambda_credit=round(lam_credit, 2),
+                        lambda_mortgage=round(lam_mortgage, 2), avg_service_min=round(avg_service, 1),
+                        R_total=r_total_capped, R_credit=r_credit, R_mortgage=r_mortgage,
+                        Wq_at_cap_min=round(wq_at_cap, 1), threshold_reachable=reachable))
+    return pd.DataFrame(rows).sort_values('hour').reset_index(drop=True)
+
+
+
+
+def recommend_windows(client_arrivals: pd.DataFrame, operations: pd.DataFrame, branch_id: str, weekday_en: str) -> Tuple[int, int, int]:
+    """
+    Рекомендует количество окон для нового отделения (без учёта физических
+    ограничений). Печатает и возвращает максимальные значения R_total,
+    R_credit, R_mortgage за день.
+
+    Args:
+        client_arrivals: DataFrame client_arrivals.csv.
+        operations: DataFrame operations.csv.
+        branch_id: идентификатор отделения.
+        weekday_en: день недели на английском ('Monday').
+
+    Returns:
+        Кортеж (max_total, max_credit, max_mortgage).
+    """
+    df = required_windows_unconstrained(client_arrivals, operations, branch_id, weekday_en)
+    max_total = df['R_total'].max()
+    max_credit = df['R_credit'].max()
+    max_mortgage = df['R_mortgage'].max()
+    print(f"Рекомендуемое общее число окон: {max_total}")
+    print(f"Из них credit+: {max_credit}, mortgage: {max_mortgage}")
+    return max_total, max_credit, max_mortgage
+def required_windows_unconstrained(client_arrivals: pd.DataFrame, operations: pd.DataFrame, branch_id: str, weekday_en: str) -> pd.DataFrame:
+    """
+    Вычисляет требуемое количество окон по часам без ограничения физическим
+    максимумом (как если бы отделение строилось с нуля).
+
+    Аналогична required_windows_table, но n_windows_max не используется,
+    поэтому R_total может превышать любое фиксированное число окон.
+
+    Args:
+        client_arrivals: DataFrame client_arrivals.csv со столбцами
+            arrival_datetime, branch_id, operation_id, service_time_min.
+        operations: DataFrame operations.csv со столбцами operation_id,
+            required_skill.
+        branch_id: идентификатор отделения ('BR01' и т.д.).
+        weekday_en: день недели на английском ('Monday' и т.д.).
+
+    Returns:
+        DataFrame с колонками: hour, lambda_total, lambda_credit,
+        lambda_mortgage, avg_service_min, R_total, R_credit,
+        R_mortgage, Wq_at_cap_min, threshold_reachable.
+    """
+    ops = operations.set_index('operation_id')['required_skill']
+    ca = client_arrivals.copy()
+    ca['arrival_datetime'] = pd.to_datetime(ca['arrival_datetime'])
+    ca['weekday_en'] = ca['arrival_datetime'].dt.day_name()
+    ca['hour'] = ca['arrival_datetime'].dt.hour
+    ca['skill'] = ca['operation_id'].map(ops)
+
+    sub = ca[(ca['branch_id'] == branch_id) & (ca['weekday_en'] == weekday_en)]
+    n_weeks = sub['arrival_datetime'].dt.date.nunique()  # число наблюдаемых недель для усреднения (MLE лямбды)
+
+    rows = []
+    for hour, g in sub.groupby('hour'):
+        lam_total = len(g) / n_weeks
+        # credit+ включает mortgage: senior может делать всё, что и middle (вложенность навыков)
+        lam_credit = len(g[g['skill'].isin(['credit', 'mortgage'])]) / n_weeks
+        lam_mortgage = len(g[g['skill'] == 'mortgage']) / n_weeks
+        # эффективное среднее время обслуживания В ЭТОТ КОНКРЕТНЫЙ час (наблюдаемое
+        # по факту, а не общее среднее по отделению) — учитывает, что микс типов
+        # операций может отличаться по часам (например, больше кредитных консультаций
+        # в обед, когда у людей есть время)
+        avg_service = g['service_time_min'].mean()
+
+        r_total = min_windows_erlang(lam_total, avg_service)
+        r_credit = min_skill_servers(lam_credit, SERVICE_MIN['credit'])
+        r_mortgage = min_skill_servers(lam_mortgage, SERVICE_MIN['mortgage'])
+
+        # физический потолок окон в отделении — жёсткое ограничение сверху
+        r_total_capped = r_total
+        # гарантируем вложенность: под-требования не могут превышать общее
+        r_credit = min(r_credit, r_total_capped)
+        r_mortgage = min(r_mortgage, r_credit)
+
+        # если даже на физическом максимуме окон порог недостижим — считаем
+        # реальный Wq на этом максимуме, чтобы явно показать масштаб проблемы
+        # (а не просто "порог не достигнут", а "насколько именно не достигнут")
+        mu_total = 60.0 / avg_service if avg_service > 0 else np.nan
+        wq_at_cap = (erlang_c_wait_minutes(lam_total, mu_total, r_total_capped)
+                    if lam_total > 0 else 0.0)
+        reachable = wq_at_cap <= THRESHOLD_MIN
+
+        rows.append(dict(hour=hour, lambda_total=round(lam_total, 2), lambda_credit=round(lam_credit, 2),
+                        lambda_mortgage=round(lam_mortgage, 2), avg_service_min=round(avg_service, 1),
+                        R_total=r_total_capped, R_credit=r_credit, R_mortgage=r_mortgage,
+                        Wq_at_cap_min=round(wq_at_cap, 1), threshold_reachable=reachable))
+    return pd.DataFrame(rows).sort_values('hour').reset_index(drop=True)
+
+
+
+
+if __name__ == '__main__':
+    # Демонстрация: требуемые окна по часам для понедельника, все 3 отделения.
+    ca = pd.read_csv('dataset/client_arrivals.csv')
+    ops = pd.read_csv('dataset/operations.csv')
+    br = pd.read_csv('dataset/branches.csv').set_index('branch_id')
+
+    for bid in ['BR01', 'BR02', 'BR03']:
+        n_win = int(br.loc[bid, 'n_windows'])
+        t = required_windows_table(ca, ops, bid, 'Monday', n_win)
+        print(f"\n=== {bid} ({br.loc[bid,'name']}), окон физически: {n_win}, понедельник ===")
+        print(t.to_string(index=False))
+    for bid in ['BR01', 'BR02', 'BR03']:
+        t = required_windows_unconstrained(ca, ops, bid, 'Monday')
+        print(f"\n=== {bid} ({br.loc[bid,'name']}), понедельник ===")
+        print(t.to_string(index=False))
+        max_total, max_credit, max_mortgage = recommend_windows(ca, ops, bid, 'Monday')
+        print(f"Рекомендуемое общее число окон: {max_total}")
+        print(f"  из них credit+ : {max_credit}")
+        print(f"  из них mortgage: {max_mortgage}")
+
+```
+```schedule_greedy.py
+"""
+schedule_greedy.py
+Жадный алгоритм: по требуемому числу окон R_total/R_credit/R_mortgage(hour)
+(вход из required_windows.py) распределяет сотрудников отделения по сменам
+на один день, соблюдая: иерархию навыков, обеденный перерыв, дневной и
+недельный лимит часов.
+
+Параметризован по branch_id/weekday -> тривиально масштабируется на другие
+отделения и дни (см. schedule_week() в конце файла).
+"""
+import pandas as pd
+import numpy as np
+from dataclasses import dataclass, field
+from typing import List, Optional, Tuple, Dict
+from required_windows import required_windows_table
+
+from config import MAX_WORK_TIME, MAX_WORK_TIME_BEFORE_LAUNCH, MIN_WORK_TIME, WEEKDAY_HOURS, MAX_HOURS_WEEK, MIN_TIME_BETWEEN_BREAK_AND_END
+
+SKILL_RANK = {'basic': 0, 'credit': 1, 'mortgage': 2}
+
+@dataclass
+class Pattern:
+    start: int
+    end: int                      # открытый интервал [start, end)
+    lunch_hour: Optional[int]     # час обеда (исключается из serving_hours), None если смена короткая
+    serving_hours: tuple          # часы, в которые сотрудник реально обслуживает окно
+
+    @property
+    def span(self):
+        return self.end - self.start
+
+    @property
+    def paid_hours(self):
+        return len(self.serving_hours)
+
+
+def generate_patterns(open_hour: int, close_hour: int, max_span: int = MAX_WORK_TIME,
+                       min_span: int = MIN_WORK_TIME, lunch_required_from_span: int = MAX_WORK_TIME_BEFORE_LAUNCH) -> List[Pattern]:
+    """
+    Генерирует все допустимые варианты смен для одного рабочего дня.
+
+    Для каждого возможного часа начала и допустимой продолжительности
+    строит непрерывный интервал [start, end). Если смена длиннее
+    lunch_required_from_span, перебираются варианты с одним обеденным
+    часом (не в начале и не в конце), иначе обед не предусмотрен.
+
+    Args:
+        open_hour: час открытия отделения.
+        close_hour: час закрытия (сам этот час уже не работает).
+        max_span: максимальная продолжительность смены.
+        min_span: минимальная продолжительность смены.
+        lunch_required_from_span: порог, после которого обед обязателен.
+
+    Returns:
+        Список объектов Pattern.
+    """
+    patterns = []
+    for start in range(open_hour, close_hour):
+        for span in range(min_span, max_span + 1):
+            end = start + span
+            if end > close_hour:
+                continue
+            if span == lunch_required_from_span + 1:
+                continue
+            if span > lunch_required_from_span:
+                # обед где-то в средней трети смены, минимум 2ч работы до и 1ч после 
+                for lunch_hour in range(start + MIN_WORK_TIME, min(end - MIN_TIME_BETWEEN_BREAK_AND_END,start + lunch_required_from_span)):
+                    serving = tuple(h for h in range(start, end) if h != lunch_hour)
+                    patterns.append(Pattern(start, end, lunch_hour, serving))
+            else:
+                patterns.append(Pattern(start, end, None, tuple(range(start, end))))
+    return patterns
+
+def schedule_day(employees: pd.DataFrame, req: pd.DataFrame, open_hour: int, close_hour: int,
+                  n_windows_max: int, weekly_hours_used: dict = None,
+                  max_hours_week: int = MAX_HOURS_WEEK, max_hours_day: int = MAX_WORK_TIME) -> Tuple[List[Dict], pd.DataFrame, List[str], Dict]:
+    """
+    Жадно распределяет сотрудников отделения по сменам на один день.
+
+    Алгоритм последовательно закрывает дефицит окон трёх уровней:
+    mortgage, credit, total. Для каждого уровня выбирается час с
+    максимальным дефицитом и ищется сотрудник/смена, максимально
+    уменьшающие суммарный дефицит.
+
+    Args:
+        employees: DataFrame сотрудников отделения (employee_id, grade,
+            skills, hourly_cost_rub).
+        req: DataFrame из required_windows_table (hour, R_total,
+            R_credit, R_mortgage).
+        open_hour: час открытия отделения.
+        close_hour: час закрытия.
+        n_windows_max: физический максимум окон.
+        weekly_hours_used: словарь {employee_id: отработано часов на
+            неделе}, для многодневного планирования.
+        max_hours_week: недельный лимит часов.
+        max_hours_day: максимальная длина смены (учтена через generate_patterns).
+
+    Returns:
+        Кортеж (assignments, coverage_df, unresolved, weekly_hours_used):
+        - assignments: список dict с информацией о каждой смене,
+        - coverage_df: DataFrame с требуемым и фактическим покрытием,
+        - unresolved: список предупреждений о нехватке ресурсов,
+        - weekly_hours_used: обновлённый словарь отработанных часов.
+    """
+    weekly_hours_used = dict(weekly_hours_used or {})
+    hours = list(req['hour'])
+    R_total = dict(zip(req['hour'], req['R_total']))
+    R_credit = dict(zip(req['hour'], req['R_credit']))
+    R_mortgage = dict(zip(req['hour'], req['R_mortgage']))
+
+    cov_total = {h: 0 for h in hours}
+    cov_credit = {h: 0 for h in hours}
+    cov_mortgage = {h: 0 for h in hours}
+
+    patterns = generate_patterns(open_hour, close_hour)
+    assigned_today = set()
+    assignments = []
+    unresolved = []
+
+    def eligible(emp_skills, tier):
+        if tier == 'mortgage':
+            return 'mortgage' in emp_skills
+        if tier == 'credit':
+            return 'credit' in emp_skills or 'mortgage' in emp_skills
+        return True  # total tier — любой грейд подходит
+
+    given_up = set()  # (tier, hour) — признанные нерешаемыми, чтобы не зацикливаться; R_* при этом не портим
+
+    def deficit(tier, h):
+        if (tier, h) in given_up:
+            return 0
+        if tier == 'mortgage':
+            return max(0, R_mortgage[h] - cov_mortgage[h])
+        if tier == 'credit':
+            return max(0, R_credit[h] - cov_credit[h])
+        return max(0, R_total[h] - cov_total[h])
+
+    for tier in ['mortgage', 'credit', 'total']:
+        while True:
+            deficits = {h: deficit(tier, h) for h in hours}
+            if max(deficits.values(), default=0) == 0:
+                break
+            # час с максимальным дефицитом (при равенстве — самый ранний)
+            t_star = max(hours, key=lambda h: (deficits[h], -h))
+            if deficits[t_star] == 0:
+                break
+
+            candidates = employees[~employees['employee_id'].isin(assigned_today)].copy()
+            candidates = candidates[candidates['skills'].apply(lambda s: eligible(s, tier))]
+
+            best = None  # (score, -cost, pattern, employee_id)
+            for _, e in candidates.iterrows():
+                remaining_week = max_hours_week - weekly_hours_used.get(e['employee_id'], 0)
+                if remaining_week <= 0:
+                    continue
+                for p in patterns:
+                    if t_star not in p.serving_hours:
+                        continue
+                    if p.paid_hours > remaining_week:
+                        continue
+                    # физический потолок: нельзя занять окно, если все n_windows_max уже заняты в этот час
+                    if any(cov_total[h] >= n_windows_max for h in p.serving_hours):
+                        continue
+                    # сколько текущих дефицитов (по всем уровням) закроет эта смена
+                    score = 0.0
+                    for h in p.serving_hours:
+                        score += deficit('total', h) * 1.0
+                        score += deficit('credit', h) * 0.5 if eligible(e['skills'], 'credit') else 0
+                        score += deficit('mortgage', h) * 0.5 if eligible(e['skills'], 'mortgage') else 0
+                    key = (score, -e['hourly_cost_rub'], -p.paid_hours)
+                    if best is None or key > best[0]:
+                        best = (key, p, e)
+
+            if best is None:
+                unresolved.append(f"Час {t_star}: не нашлось сотрудника/смены, чтобы закрыть дефицит "
+                                   f"({tier}, дефицит={deficits[t_star]}) — не хватает людей нужной квалификации/часов "
+                                   f"или это столкнётся с лимитом окон в соседние часы смены")
+                given_up.add((tier, t_star))  # не зацикливаемся, но R_total/R_credit/R_mortgage остаются как есть
+                continue
+
+            _, p, e = best
+            assigned_today.add(e['employee_id'])
+            weekly_hours_used[e['employee_id']] = weekly_hours_used.get(e['employee_id'], 0) + p.paid_hours
+            for h in p.serving_hours:
+                cov_total[h] += 1
+                if eligible(e['skills'], 'credit'):
+                    cov_credit[h] += 1
+                if eligible(e['skills'], 'mortgage'):
+                    cov_mortgage[h] += 1
+            assignments.append(dict(employee_id=e['employee_id'], name=e.get('name', ''), grade=e['grade'],
+                                     start=p.start, end=p.end, lunch_hour=p.lunch_hour,
+                                     serving_hours=p.serving_hours, paid_hours=p.paid_hours,
+                                     hourly_cost=e['hourly_cost_rub'], shift_cost=p.paid_hours * e['hourly_cost_rub']))
+
+    coverage_df = pd.DataFrame({
+        'hour': hours,
+        'R_total': [R_total[h] for h in hours], 'cov_total': [cov_total[h] for h in hours],
+        'R_credit': [R_credit[h] for h in hours], 'cov_credit': [cov_credit[h] for h in hours],
+        'R_mortgage': [R_mortgage[h] for h in hours], 'cov_mortgage': [cov_mortgage[h] for h in hours],
+    })
+    return assignments, coverage_df, unresolved, weekly_hours_used
+
+def schedule_week(client_arrivals: pd.DataFrame, operations: pd.DataFrame, employees: pd.DataFrame,
+                   branches: pd.DataFrame, branch_id: str) -> tuple[dict[str, dict], pd.DataFrame]:
+    """
+    Масштабирование schedule_day на всю рабочую неделю одного отделения.
+    Часы, использованные сотрудником, переносятся день в день (недельный лимит 40ч соблюдается сквозно).
+    Возвращает: dict{weekday: (assignments, coverage, unresolved)}, итоговую сводку по сотрудникам.
+    """
+    n_win = int(branches.loc[branch_id, 'n_windows'])
+    branch_emp = employees[employees['branch_id'] == branch_id]
+    weekly_hours_used = {}
+    results = {}
+    for weekday, (open_h, close_h) in WEEKDAY_HOURS.items():
+        req = required_windows_table(client_arrivals, operations, branch_id, weekday, n_win)
+        if req.empty:
+            continue
+        assignments, coverage, unresolved, weekly_hours_used = schedule_day(
+            branch_emp, req, open_h, close_h, n_windows_max=n_win,
+            weekly_hours_used=weekly_hours_used)  # <- перенос часов между днями недели
+        results[weekday] = dict(assignments=assignments, coverage=coverage, unresolved=unresolved)
+
+    summary = pd.DataFrame([
+        dict(employee_id=eid, hours_this_week=h, max_hours_week=MAX_HOURS_WEEK, utilization=round(h/MAX_HOURS_WEEK, 2))
+        for eid, h in weekly_hours_used.items()
+    ]).sort_values('hours_this_week', ascending=False)
+    return results, summary
+
+
+if __name__ == '__main__':
+    ca = pd.read_csv('dataset/client_arrivals.csv')
+    ops = pd.read_csv('dataset/operations.csv')
+    br = pd.read_csv('dataset/branches.csv').set_index('branch_id')
+    emp = pd.read_csv('dataset/employees.csv')
+    emp['skills'] = emp['skills'].str.split(',')
+
+    BRANCH, WEEKDAY_EN = 'BR01', 'Monday'  # Это для таблицы сравнения графиков по отделниям на 1 день
+    n_win = int(br.loc[BRANCH, 'n_windows'])
+    open_h, close_h = WEEKDAY_HOURS[WEEKDAY_EN] # из hours_weekday «09:00-19:00»
+
+    req = required_windows_table(ca, ops, BRANCH, WEEKDAY_EN, n_win)
+    branch_emp = emp[emp['branch_id'] == BRANCH]
+
+    assignments, coverage, unresolved, hours_used = schedule_day(
+        branch_emp, req, open_h, close_h, n_windows_max=n_win)
+
+    print(f"=== Расписание {BRANCH}, понедельник ===\n")
+    sched_df = pd.DataFrame(assignments)
+    print(sched_df[['employee_id', 'grade', 'start', 'end', 'lunch_hour', 'paid_hours', 'shift_cost']]
+          .sort_values('start').to_string(index=False))
+
+    print(f"\nСотрудников задействовано: {len(assignments)} из {len(branch_emp)}")
+    print(f"Суммарный ФОТ за день: {sched_df['shift_cost'].sum():.0f} руб.")
+
+    print("\n=== Покрытие по часам (требуется / открыто) ===")
+    print(coverage.to_string(index=False))
+
+    if unresolved:
+        print("\n=== Нерешённые дефициты ===")
+        for u in unresolved:
+            print(" -", u)
+    else:
+        print("\nВсе требования по окнам закрыты штатом отделения.")
+
+```
+```schedule_ilp.py
+"""
+schedule_ilp.py
+================
+Точная (не эвристическая) версия планировщика расписания через целочисленное
+линейное программирование (ILP).
+
+Формальная постановка — задача set-covering по паттернам смен (тот же набор
+паттернов, что генерирует schedule_greedy.generate_patterns):
+    Переменные:   z(e, p) in {0, 1} — сотрудник e работает по паттерну смены p.
+    Минимизация:  суммарный ФОТ = sum(z(e,p) * hourly_cost(e) * paid_hours(p)).
+    Ограничения:  покрытие требуемых окон (R_total/R_credit/R_mortgage) по
+                  каждому часу, не более одной смены на сотрудника в день,
+                  недельный лимит часов, физический потолок окон отделения.
+
+Решается через scipy.optimize.milp (солвер HiGHS, входит в scipy "из
+коробки"). Даёт ДВЕ версии:
+    - schedule_day_ilp       — жёсткая: покрытие обязательно (constraint),
+      может оказаться infeasible, если ресурсов физически не хватает даже
+      теоретически (см. пример использования в конце файла — на BR01 эта
+      версия доказуемо infeasible).
+    - schedule_day_ilp_soft  — мягкая: недобор допускается через штрафные
+      переменные (используется во всех сравнениях compare_*.py, т.к. всегда
+      разрешима).
+
+Тот же вход/выход, что у schedule_greedy.schedule_day — их результаты
+напрямую сравнимы (см. compare_policies.py).
+"""
+import pandas as pd
+import numpy as np
+from scipy.optimize import milp, LinearConstraint, Bounds
+from schedule_greedy import generate_patterns, Pattern
+from required_windows import required_windows_table
+from config import WEEKDAY_HOURS, MAX_HOURS_WEEK
+
+
+def schedule_day_ilp(employees: pd.DataFrame, req: pd.DataFrame, open_hour: int, close_hour: int,
+                      n_windows_max: int, max_hours_week: int = MAX_HOURS_WEEK, weekly_hours_used: dict = None):
+    """
+    Жёсткая версия ILP: находит расписание МИНИМАЛЬНОЙ стоимости, которое
+    ОБЯЗАТЕЛЬНО закрывает весь требуемый спрос (R_total/R_credit/R_mortgage)
+    по каждому часу. Если это физически невозможно при данном штате и
+    правилах смен — solver вернёт infeasible (это не баг, а содержательный
+    результат: доказательство нехватки ресурса, см. schedule_ilp.py __main__
+    и раздел 4.2 отчёта — на BR01 инфизибилити доказана строго).
+
+    Переменные: одна бинарная переменная z(e,p) на каждую физически
+    допустимую пару (сотрудник e, паттерн смены p) — "физически допустимую"
+    значит, что у сотрудника хватает оставшихся недельных часов на этот
+    паттерн (remaining_week >= p.paid_hours).
+
+    Args:
+        employees: датафрейм сотрудников ОДНОГО отделения (employee_id,
+            grade, skills, hourly_cost_rub).
+        req: датафрейм из required_windows_table (hour, R_total, R_credit,
+            R_mortgage) для этого отделения/дня недели.
+        open_hour: час открытия отделения.
+        close_hour: час закрытия отделения.
+        n_windows_max: физическое число окон отделения — верхняя граница
+            суммарного покрытия total в любой час.
+        max_hours_week: недельный лимит часов на сотрудника.
+        weekly_hours_used: {employee_id: часов уже отработано на этой
+            неделе} — для многодневного режима (перенос между днями).
+
+    Returns:
+        Если решение найдено: кортеж (assignments, coverage_df, 'optimal',
+        new_weekly_hours_used) — тот же формат, что у schedule_greedy.schedule_day.
+        Если задача infeasible: ([], None, сообщение_солвера,
+        weekly_hours_used) — сообщение солвера объясняет причину.
+    """
+    weekly_hours_used = weekly_hours_used or {}
+    hours = list(req['hour'])
+    R_total = dict(zip(req['hour'], req['R_total']))
+    R_credit = dict(zip(req['hour'], req['R_credit']))
+    R_mortgage = dict(zip(req['hour'], req['R_mortgage']))
+
+    patterns = generate_patterns(open_hour, close_hour)
+    emp_list = employees.to_dict('records')
+
+    # переменные: все пары (сотрудник, паттерн), которые физически возможны
+    # (у сотрудника хватает недельных часов на этот паттерн)
+    var_emp_idx, var_pat_idx = [], []
+    for ei, e in enumerate(emp_list):
+        remaining_week = max_hours_week - weekly_hours_used.get(e['employee_id'], 0)
+        for pi, p in enumerate(patterns):
+            if p.paid_hours <= remaining_week:
+                var_emp_idx.append(ei)
+                var_pat_idx.append(pi)
+    n_vars = len(var_emp_idx)
+
+    # целевая функция: стоимость смены = ставка сотрудника * оплачиваемые часы паттерна
+    cost = np.array([emp_list[var_emp_idx[i]]['hourly_cost_rub'] * patterns[var_pat_idx[i]].paid_hours
+                      for i in range(n_vars)])
+
+    def can(skills, tier):
+        """Может ли сотрудник с данными навыками закрывать окно уровня tier."""
+        if tier == 'mortgage':
+            return 'mortgage' in skills
+        if tier == 'credit':
+            return 'credit' in skills or 'mortgage' in skills
+        return True
+
+    constraints = []
+    rows, lb, ub = [], [], []
+
+    def add_row(coeffs_idx, lo, hi):
+        """Добавляет одну строку линейного ограничения lo <= sum(x[coeffs_idx]) <= hi."""
+        row = np.zeros(n_vars)
+        row[coeffs_idx] = 1.0
+        rows.append(row); lb.append(lo); ub.append(hi)
+
+    for h in hours:
+        idx_total = [i for i in range(n_vars) if h in patterns[var_pat_idx[i]].serving_hours]
+        idx_credit = [i for i in idx_total if can(emp_list[var_emp_idx[i]]['skills'], 'credit')]
+        idx_mortgage = [i for i in idx_total if can(emp_list[var_emp_idx[i]]['skills'], 'mortgage')]
+        # R_total(h) <= sum <= n_windows_max   (спрос снизу, физический потолок сверху)
+        add_row(idx_total, R_total[h], n_windows_max)
+        add_row(idx_credit, R_credit[h], n_vars)      # верхнюю границу не ограничиваем отдельно — её держит total
+        add_row(idx_mortgage, R_mortgage[h], n_vars)
+
+    # один паттерн на сотрудника в день (сотрудник либо работает одну смену, либо не работает)
+    for ei in range(len(emp_list)):
+        idx = [i for i in range(n_vars) if var_emp_idx[i] == ei]
+        if idx:
+            add_row(idx, 0, 1)
+
+    A = np.array(rows)
+    constraints = [LinearConstraint(A, lb, ub)]
+    bounds = Bounds(0, 1)
+    integrality = np.ones(n_vars)  # все переменные бинарные (0/1)
+
+    res = milp(cost, constraints=constraints, bounds=bounds, integrality=integrality)
+
+    if not res.success:
+        return [], None, res.message, weekly_hours_used
+
+    # восстанавливаем расписание из вектора решения x (округляем — HiGHS иногда
+    # возвращает 0.999999 вместо 1.0 из-за численной точности солвера)
+    x = np.round(res.x).astype(int)
+    assignments = []
+    new_weekly = dict(weekly_hours_used)
+    cov_total = {h: 0 for h in hours}
+    cov_credit = {h: 0 for h in hours}
+    cov_mortgage = {h: 0 for h in hours}
+
+    for i in range(n_vars):
+        if x[i] == 1:
+            e = emp_list[var_emp_idx[i]]
+            p = patterns[var_pat_idx[i]]
+            new_weekly[e['employee_id']] = new_weekly.get(e['employee_id'], 0) + p.paid_hours
+            for h in p.serving_hours:
+                cov_total[h] += 1
+                if can(e['skills'], 'credit'):
+                    cov_credit[h] += 1
+                if can(e['skills'], 'mortgage'):
+                    cov_mortgage[h] += 1
+            assignments.append(dict(employee_id=e['employee_id'], grade=e['grade'],
+                                     start=p.start, end=p.end, lunch_hour=p.lunch_hour,
+                                     serving_hours=p.serving_hours, paid_hours=p.paid_hours,
+                                     hourly_cost=e['hourly_cost_rub'], shift_cost=p.paid_hours * e['hourly_cost_rub']))
+
+    coverage_df = pd.DataFrame({
+        'hour': hours,
+        'R_total': [R_total[h] for h in hours], 'cov_total': [cov_total[h] for h in hours],
+        'R_credit': [R_credit[h] for h in hours], 'cov_credit': [cov_credit[h] for h in hours],
+        'R_mortgage': [R_mortgage[h] for h in hours], 'cov_mortgage': [cov_mortgage[h] for h in hours],
+    })
+    return assignments, coverage_df, 'optimal', new_weekly
+
+
+def schedule_day_ilp_soft(employees: pd.DataFrame, req: pd.DataFrame, open_hour: int, close_hour: int,
+                           n_windows_max: int, max_hours_week: int = MAX_HOURS_WEEK, weekly_hours_used: dict = None,
+                           penalty_total: float = 8000, penalty_credit: float = 6000, penalty_mortgage: float = 6000):
+    """
+    Мягкая версия ILP: физический потолок окон (n_windows_max) остаётся
+    жёстким ограничением (его нарушить нельзя — это реальная стена, не
+    больше окон, чем есть), а недобор по R_total/R_credit/R_mortgage
+    допускается через неотрицательные штрафные переменные-слэки
+    u_total(h), u_credit(h), u_mortgage(h) — после того, как было строго
+    доказано (schedule_day_ilp на BR01), что жёсткая версия иногда попросту
+    infeasible при разумном штате и правилах смен.
+
+    Целевая функция = ФОТ + штраф*недобор. Штрафы (penalty_*) на порядок
+    больше типичной стоимости смены (350-700 руб./час), поэтому солвер
+    сначала минимизирует недобор (закрывает спрос максимально полно), и
+    только при равном недоборе — экономит на ФОТ. Это соответствует
+    приоритету брифа: "минимизировать ожидание клиента при бюджетных
+    ограничениях", где недобор напрямую увеличивает реальное ожидание.
+
+    Переменные вектора решения: сначала n_z бинарных z(e,p) (как в
+    schedule_day_ilp), затем 3*n_h непрерывных слэк-переменных (по одной
+    на каждый час для каждого из 3 уровней требования).
+
+    Args:
+        employees, req, open_hour, close_hour, n_windows_max,
+            max_hours_week, weekly_hours_used: см. schedule_day_ilp.
+        penalty_total: штраф за 1 час недобора total-уровня.
+        penalty_credit: штраф за 1 час недобора credit-уровня.
+        penalty_mortgage: штраф за 1 час недобора mortgage-уровня.
+
+    Returns:
+        Если решение найдено: кортеж (assignments, coverage_df, 'optimal',
+        new_weekly_hours_used, shortfall_summary), где:
+        - coverage_df дополнительно содержит столбцы shortfall_total/
+          shortfall_credit/shortfall_mortgage по часам;
+        - shortfall_summary: dict(total=…, credit=…, mortgage=…) — суммарный
+          недобор за день по каждому уровню (в окно-часах).
+        Если infeasible (не должно происходить при разумных параметрах,
+        т.к. недобор всегда можно "закрыть" штрафной переменной):
+        ([], None, сообщение, weekly_hours_used, None).
+    """
+    weekly_hours_used = weekly_hours_used or {}
+    hours = list(req['hour'])
+    R_total = dict(zip(req['hour'], req['R_total']))
+    R_credit = dict(zip(req['hour'], req['R_credit']))
+    R_mortgage = dict(zip(req['hour'], req['R_mortgage']))
+
+    patterns = generate_patterns(open_hour, close_hour)
+    emp_list = employees.to_dict('records')
+
+    var_emp_idx, var_pat_idx = [], []
+    for ei, e in enumerate(emp_list):
+        remaining_week = max_hours_week - weekly_hours_used.get(e['employee_id'], 0)
+        for pi, p in enumerate(patterns):
+            if p.paid_hours <= remaining_week:
+                var_emp_idx.append(ei)
+                var_pat_idx.append(pi)
+    n_z = len(var_emp_idx)  # число "рабочих" (сотрудник, паттерн) бинарных переменных
+    n_h = len(hours)
+    # порядок доп. переменных в векторе решения: u_total(h...), u_credit(h...), u_mortgage(h...)
+    n_vars = n_z + 3 * n_h
+
+    def can(skills, tier):
+        """Может ли сотрудник с данными навыками закрывать окно уровня tier."""
+        if tier == 'mortgage':
+            return 'mortgage' in skills
+        if tier == 'credit':
+            return 'credit' in skills or 'mortgage' in skills
+        return True
+
+    # целевая функция: ФОТ по бинарным переменным + штраф по слэк-переменным
+    cost = np.zeros(n_vars)
+    cost[:n_z] = [emp_list[var_emp_idx[i]]['hourly_cost_rub'] * patterns[var_pat_idx[i]].paid_hours
+                  for i in range(n_z)]
+    cost[n_z:n_z + n_h] = penalty_total
+    cost[n_z + n_h:n_z + 2 * n_h] = penalty_credit
+    cost[n_z + 2 * n_h:n_z + 3 * n_h] = penalty_mortgage
+
+    rows, lb, ub = [], [], []
+
+    def add_row(z_idx, extra_idx, extra_coef, lo, hi):
+        """
+        Добавляет строку линейного ограничения lo <= sum(z[z_idx]) + extra_coef*x[extra_idx] <= hi.
+        extra_idx=None означает ограничение без слэк-переменной (например, физический потолок).
+        """
+        row = np.zeros(n_vars)
+        row[z_idx] = 1.0
+        if extra_idx is not None:
+            row[extra_idx] = extra_coef
+        rows.append(row); lb.append(lo); ub.append(hi)
+
+    for hi_, h in enumerate(hours):
+        idx_total = [i for i in range(n_z) if h in patterns[var_pat_idx[i]].serving_hours]
+        idx_credit = [i for i in idx_total if can(emp_list[var_emp_idx[i]]['skills'], 'credit')]
+        idx_mortgage = [i for i in idx_total if can(emp_list[var_emp_idx[i]]['skills'], 'mortgage')]
+        u_t, u_c, u_m = n_z + hi_, n_z + n_h + hi_, n_z + 2 * n_h + hi_
+        add_row(idx_total, u_t, 1.0, R_total[h], np.inf)   # sum + u_total >= R_total  (нижняя граница по спросу, со слэком)
+        add_row(idx_total, None, 0, 0, n_windows_max)        # sum <= n_windows_max     (физика — жёстко, без слэка)
+        add_row(idx_credit, u_c, 1.0, R_credit[h], np.inf)
+        add_row(idx_mortgage, u_m, 1.0, R_mortgage[h], np.inf)
+
+    # один паттерн на сотрудника в день
+    for ei in range(len(emp_list)):
+        idx = [i for i in range(n_z) if var_emp_idx[i] == ei]
+        if idx:
+            add_row(idx, None, 0, 0, 1)
+
+    A = np.array(rows)
+    constraints = [LinearConstraint(A, lb, ub)]
+    # бинарные z в [0,1], слэк-переменные u в [0, n_windows_max] (недобор физически
+    # не может превышать сам физический потолок окон)
+    bounds = Bounds(np.concatenate([np.zeros(n_z), np.zeros(3 * n_h)]),
+                     np.concatenate([np.ones(n_z), np.full(3 * n_h, n_windows_max, dtype=float)]))
+    integrality = np.concatenate([np.ones(n_z), np.zeros(3 * n_h)])  # z бинарные, u непрерывные
+
+    res = milp(cost, constraints=constraints, bounds=bounds, integrality=integrality)
+    if not res.success:
+        return [], None, res.message, weekly_hours_used, None
+
+    x = res.x
+    z = np.round(x[:n_z]).astype(int)  # округляем бинарную часть (численная точность солвера)
+    u_total = x[n_z:n_z + n_h]
+    u_credit = x[n_z + n_h:n_z + 2 * n_h]
+    u_mortgage = x[n_z + 2 * n_h:n_z + 3 * n_h]
+
+    assignments = []
+    new_weekly = dict(weekly_hours_used)
+    cov_total = {h: 0 for h in hours}
+    cov_credit = {h: 0 for h in hours}
+    cov_mortgage = {h: 0 for h in hours}
+    for i in range(n_z):
+        if z[i] == 1:
+            e = emp_list[var_emp_idx[i]]
+            p = patterns[var_pat_idx[i]]
+            new_weekly[e['employee_id']] = new_weekly.get(e['employee_id'], 0) + p.paid_hours
+            for h in p.serving_hours:
+                cov_total[h] += 1
+                if can(e['skills'], 'credit'):
+                    cov_credit[h] += 1
+                if can(e['skills'], 'mortgage'):
+                    cov_mortgage[h] += 1
+            assignments.append(dict(employee_id=e['employee_id'], grade=e['grade'],
+                                     start=p.start, end=p.end, lunch_hour=p.lunch_hour,
+                                     serving_hours=p.serving_hours, paid_hours=p.paid_hours,
+                                     hourly_cost=e['hourly_cost_rub'], shift_cost=p.paid_hours * e['hourly_cost_rub']))
+
+    coverage_df = pd.DataFrame({
+        'hour': hours,
+        'R_total': [R_total[h] for h in hours], 'cov_total': [cov_total[h] for h in hours],
+        'R_credit': [R_credit[h] for h in hours], 'cov_credit': [cov_credit[h] for h in hours],
+        'R_mortgage': [R_mortgage[h] for h in hours], 'cov_mortgage': [cov_mortgage[h] for h in hours],
+        'shortfall_total': np.round(u_total, 2), 'shortfall_credit': np.round(u_credit, 2),
+        'shortfall_mortgage': np.round(u_mortgage, 2),
+    })
+    shortfall_summary = dict(total=u_total.sum(), credit=u_credit.sum(), mortgage=u_mortgage.sum())
+    return assignments, coverage_df, 'optimal', new_weekly, shortfall_summary
+
+
+def schedule_week_ilp(client_arrivals: pd.DataFrame,
+                      operations: pd.DataFrame,
+                      employees: pd.DataFrame,
+                      branches: pd.DataFrame,
+                      branch_id: str):
+    """
+    ILP-аналог schedule_greedy.schedule_week: тот же перенос отработанных
+    часов между днями недели (недельный лимит 40ч соблюдается сквозно), но
+    каждый день решается через schedule_day_ilp_soft (глобальный оптимум на
+    день, а не жадный локальный выбор) — отсюда систематическое преимущество
+    над schedule_week в сравнениях week_pipeline.py.
+
+    Args:
+        client_arrivals, operations: сырые датафреймы (client_arrivals.csv,
+            operations.csv).
+        employees: полный датафрейм сотрудников (все отделения).
+        branches: датафрейм branches.csv, индексированный по branch_id.
+        branch_id: идентификатор отделения.
+
+    Returns:
+        Кортеж (results, summary):
+        - results: dict{weekday: {'assignments':…, 'coverage':…,
+          'status':…, 'shortfall':…}};
+        - summary: DataFrame по сотрудникам с недельной загрузкой
+          (hours_this_week, utilization).
+    """
+    n_win = int(branches.loc[branch_id, 'n_windows'])
+    branch_emp = employees[employees['branch_id'] == branch_id]
+    weekly_hours_used = {}
+    results = {}
+    for weekday, (open_h, close_h) in WEEKDAY_HOURS.items():
+        req = required_windows_table(client_arrivals, operations, branch_id, weekday, n_win)
+        if req.empty:
+            continue
+        assignments, coverage, status, weekly_hours_used, shortfall = schedule_day_ilp_soft(
+            branch_emp, req, open_h, close_h, n_win, weekly_hours_used=weekly_hours_used)
+        results[weekday] = dict(assignments=assignments, coverage=coverage, status=status, shortfall=shortfall)
+
+    summary = pd.DataFrame([
+        dict(employee_id=eid, hours_this_week=h, utilization=round(h/MAX_HOURS_WEEK, 2))
+        for eid, h in weekly_hours_used.items()
+    ]).sort_values('hours_this_week', ascending=False)
+    return results, summary
+
+
+if __name__ == '__main__':
+    from schedule_greedy import schedule_day
+    from compare_policies import coverage_from_assignments, avg_wait_for_coverage
+    import numpy as np
+
+    ca = pd.read_csv('dataset/client_arrivals.csv')
+    ops = pd.read_csv('dataset/operations.csv')
+    br = pd.read_csv('dataset/branches.csv').set_index('branch_id')
+    emp = pd.read_csv('dataset/employees.csv')
+    emp['skills'] = emp['skills'].str.split(',')
+
+    BRANCH, WEEKDAY_EN = 'BR01', 'Monday' # Это для таблицы сравнения графиков по отделниям на 1 день
+    n_win = int(br.loc[BRANCH, 'n_windows'])
+    req = required_windows_table(ca, ops, BRANCH, WEEKDAY_EN, n_win)
+    branch_emp = emp[emp['branch_id'] == BRANCH]
+
+    print("=== ЖЁСТКАЯ версия (доказывает infeasibility) ===")
+    _, _, status_hard, _ = schedule_day_ilp(branch_emp, req, *WEEKDAY_HOURS[WEEKDAY_EN], n_win)
+    print("Статус:", status_hard)
+
+    print("\n=== МЯГКАЯ версия (ILP, глобальный оптимум) ===")
+    assignments_ilp, coverage_ilp, status, hu, shortfall = schedule_day_ilp_soft(branch_emp, req, *WEEKDAY_HOURS[WEEKDAY_EN], n_win)
+    print("Статус:", status, "| Недобор (total/credit/mortgage):", shortfall)
+    sched_ilp = pd.DataFrame(assignments_ilp)
+    print(sched_ilp[['employee_id', 'grade', 'start', 'end', 'lunch_hour', 'paid_hours', 'shift_cost']]
+          .sort_values('start').to_string(index=False))
+    print(f"Сотрудников: {len(assignments_ilp)}, ФОТ за день: {sched_ilp['shift_cost'].sum():.0f} руб.")
+
+    print("\n=== ЖАДНЫЙ (для сравнения) ===")
+    assignments_greedy, coverage_greedy, unresolved, _ = schedule_day(
+        branch_emp, req, *WEEKDAY_HOURS[WEEKDAY_EN], n_windows_max=n_win
+    )
+    sched_greedy = pd.DataFrame(assignments_greedy)
+
+    hours_list = list(req['hour'])
+    cov_greedy = coverage_from_assignments(assignments_greedy, hours_list)
+    waits_greedy, weights_greedy = avg_wait_for_coverage(req, cov_greedy)
+    avg_wait_greedy = np.average(waits_greedy, weights=weights_greedy)
+
+    print(f"Со��рудников: {len(assignments_greedy)}, ФОТ за день: {sched_greedy['shift_cost'].sum():.0f} руб.")
+    print("\n--- Ожидание клиентов (жадный) ---")
+    print(f"Средневзвешенное ожидание за день: {avg_wait_greedy:.1f} минут")
+    print("По часам (минут):")
+    for h, w in zip(hours_list, waits_greedy):
+        print(f"  {h:02d}:00  {w:.1f} мин")
+
+    greedy_shortfall_total = (coverage_greedy['R_total'] - coverage_greedy['cov_total']).clip(lower=0).sum()
+    ilp_shortfall_total = (coverage_ilp['R_total'] - coverage_ilp['cov_total']).clip(lower=0).sum()
+    print(f"Недобор total-окно-часов (жадный): {greedy_shortfall_total}")
+    print(f"Недобор total-окно-часов (ILP): {ilp_shortfall_total}")
+
+    cov_ilp = coverage_from_assignments(assignments_ilp, hours_list)
+    waits_ilp, weights_ilp = avg_wait_for_coverage(req, cov_ilp)
+    avg_wait_ilp = np.average(waits_ilp, weights=weights_ilp)
+
+    print("\n--- Ожидание клиентов (ILP) ---")
+    print(f"Средневзвешенное ожидание за день: {avg_wait_ilp:.1f} минут")
+    print("По часам (минут):")
+    for h, w in zip(hours_list, waits_ilp):
+        print(f"  {h:02d}:00  {w:.1f} мин")
+
+    print("\n=== Сравнение ILP vs Жадный ===")
+    print(f"ILP   : среднее ожидание {avg_wait_ilp:.1f} мин, ФОТ {sched_ilp['shift_cost'].sum():.0f} руб.")
+    print(f"Жадный: среднее ожидание {avg_wait_greedy:.1f} мин, ФОТ {sched_greedy['shift_cost'].sum():.0f} руб.")
+```
+```week_pipeline.py
+"""
+week_pipeline.py
+=================
+Масштабирование сравнения naive/greedy/ILP с одного дня на всю рабочую
+неделю (Пн-Сб, Вс закрыто), для всех трёх отделений. Недельный лимит 40ч
+соблюдается сквозно для всех трёх политик — в том числе для "наивной", что
+само по себе даёт интересную находку: даже имитация текущего процесса
+вынуждена ротировать сотрудников по неделе, иначе нарушит трудовое
+законодательство (см. naive_schedule_week).
+"""
+import pandas as pd
+import numpy as np
+from required_windows import required_windows_table, erlang_c_wait_minutes
+from schedule_greedy import schedule_week
+from schedule_ilp import schedule_week_ilp
+from compare_policies import coverage_from_assignments, avg_wait_for_coverage
+from typing import Tuple, Dict
+
+from config import MAX_WORK_TIME, MAX_WORK_TIME_BEFORE_LAUNCH, WEEKDAY_HOURS, MIN_WORK_TIME, MAX_HOURS_WEEK
+
+def naive_schedule_week(employees: pd.DataFrame, n_windows_max: int, max_hours_week: int = MAX_HOURS_WEEK):
+    """
+    Недельная версия наивного расписания ("все выходят на 9:00, обед по
+    очереди"), но с поправкой на трудовое законодательство: если КАЖДЫЙ
+    день брать одних и тех же n_windows_max сотрудников на полную 8-часовую
+    смену, за 6 рабочих дней недели они превысят 40-часовой лимит. Поэтому
+    каждый день выбираются сотрудники с НАИБОЛЬШИМ остатком недельных часов
+    (простая ротация "по остатку") — это уже не совсем то, что "менеджер на
+    глаз" делает в реальности, но необходимый компромисс, чтобы наивная
+    политика вообще была допустимым (легальным) расписанием для честного
+    сравнения с greedy/ILP.
+
+    Специально НЕ учитывает форму спроса по часам и квалификацию сотрудников
+    — в этом и состоит суть "наивности" данной политики как baseline.
+
+    Args:
+        employees: датафрейм сотрудников ОДНОГО отделения.
+        n_windows_max: физическое число окон отделения (= число сотрудников
+            в смене каждый день).
+        max_hours_week: недельный лимит часов на сотрудника.
+
+    Returns:
+        Кортеж (results, weekly_hours_used):
+        - results: dict {weekday: список dict-назначений} (тот же формат,
+          что у schedule_greedy.schedule_day, но без coverage_df/unresolved
+          — они не нужны наивной схеме, coverage считается отдельно в
+          week_summary через coverage_from_assignments);
+        - weekly_hours_used: {employee_id: итоговых часов за неделю}.
+    """
+    weekly_hours_used = {eid: 0 for eid in employees['employee_id']}
+    results = {}
+    emp_records = employees.to_dict('records')
+
+    for weekday, (open_h, close_h) in WEEKDAY_HOURS.items():
+        span = min(MAX_WORK_TIME, close_h - open_h)  # суббота короче будней (7ч), полная 9ч смена не влезает
+        lunch_hour = open_h + span // 2 if span >= MAX_WORK_TIME_BEFORE_LAUNCH else None
+        end_h = open_h + span
+        serving_all = tuple(h for h in range(open_h, end_h) if h != lunch_hour)
+        paid_hours = len(serving_all)
+
+        # сортируем по остатку часов (кому больше осталось — тот в приоритете), берём первых n_windows_max с достаточным остатком
+        ranked = sorted(emp_records, key=lambda e: -(max_hours_week - weekly_hours_used[e['employee_id']]))
+        chosen = [e for e in ranked if max_hours_week - weekly_hours_used[e['employee_id']] >= paid_hours][:n_windows_max]
+
+        assignments = []
+        for i, e in enumerate(chosen):  #что за х? v         v   откуда 1 и 3???
+            lh = open_h + MIN_WORK_TIME + (i % max(1, span - 3)) if span >= MAX_WORK_TIME_BEFORE_LAUNCH else None  # лёгкий разброс обеда по очереди
+            serving = tuple(h for h in range(open_h, end_h) if h != lh) if lh is not None else serving_all
+            weekly_hours_used[e['employee_id']] += len(serving)
+            assignments.append(dict(employee_id=e['employee_id'], grade=e['grade'], start=open_h, end=end_h,
+                                     lunch_hour=lh, serving_hours=serving, paid_hours=len(serving),
+                                     hourly_cost=e['hourly_cost_rub'], shift_cost=len(serving) * e['hourly_cost_rub']))
+        results[weekday] = assignments
+    return results, weekly_hours_used
+
+
+def week_summary(ca: pd.DataFrame, ops: pd.DataFrame, br: pd.DataFrame,
+                  emp_raw: pd.DataFrame, branch_id: str) -> Tuple[Dict, Dict]:
+    """
+    Строит расписание на всю неделю тремя политиками (naive/greedy/ilp) для
+    одного отделения и агрегирует результат — недельный ФОТ, средневзвешенное
+    (по лямбда) ожидание за неделю, суммарный недобор, плюс подневную
+    разбивку (daily) для графиков по дням недели (см. например
+    br02_weekday_breakdown в отчёте).
+
+    Args:
+        ca: датафрейм client_arrivals.csv.
+        ops: датафрейм operations.csv.
+        br: датафрейм branches.csv, индексированный по branch_id.
+        emp_raw: полный датафрейм employees.csv (skills уже распарсены в list).
+        branch_id: идентификатор отделения.
+
+    Returns:
+        Кортеж (out, max_util):
+        - out: dict {'naive'/'greedy'/'ilp': {total_cost, weighted_avg_wait,
+          total_shortfall, daily}}, где daily — dict {weekday: {avg_wait,
+          cost, shortfall, weight}} для построения графиков по дням недели;
+        - max_util: dict {'naive'/'greedy'/'ilp': максимальная недельная
+          загрузка любого сотрудника, доля от 1.0} — показатель "выгорания"
+          (близко к 1.0 значит кто-то из сотрудников работает на пределе
+          40-часового лимита).
+    """
+    n_win = int(br.loc[branch_id, 'n_windows'])
+    branch_emp = emp_raw[emp_raw['branch_id'] == branch_id].reset_index(drop=True)
+
+    naive_week, naive_hours = naive_schedule_week(branch_emp, n_win)
+    greedy_week, greedy_summary = schedule_week(ca, ops, emp_raw, br, branch_id)
+    ilp_week, ilp_summary = schedule_week_ilp(ca, ops, emp_raw, br, branch_id)
+
+    out = {'naive': {}, 'greedy': {}, 'ilp': {}}
+    daily = {'naive': {}, 'greedy': {}, 'ilp': {}}
+
+    for weekday in WEEKDAY_HOURS:
+        req = required_windows_table(ca, ops, branch_id, weekday, n_win)
+        hours = list(req['hour'])
+
+        for pol, week_data in [('naive', naive_week), ('greedy', greedy_week), ('ilp', ilp_week)]:
+            # naive_schedule_week и schedule_week/schedule_week_ilp возвращают
+            # результат в чуть разной структуре (naive — сразу ��писок
+            # назначений, остальные — dict с ключом 'assignments'), отсюда
+            # разветвление ниже
+            if pol == 'naive':
+                assigns = week_data.get(weekday, [])
+            else:
+                assigns = week_data.get(weekday, {}).get('assignments', [])
+            cov = coverage_from_assignments(assigns, hours)
+            waits, weights = avg_wait_for_coverage(req, cov)
+            cost = sum(a['shift_cost'] for a in assigns)
+            shortfall = sum(max(0, r - cov[h]) for h, r in zip(hours, req['R_total']))
+            daily[pol][weekday] = dict(avg_wait=np.average(waits, weights=weights) if weights.sum() > 0 else 0,
+                                        cost=cost, shortfall=shortfall, weight=weights.sum())
+
+    for pol in out:
+        total_cost = sum(d['cost'] for d in daily[pol].values())
+        total_weight = sum(d['weight'] for d in daily[pol].values())
+        # средневзвешенное ожидание за неделю: каждый день весится по своей
+        # суммарной интенсивности потока (weight), чтобы дни с большим
+        # потоком клиентов вносили больший вклад в итоговую недельную оценку
+        weighted_wait = sum(d['avg_wait'] * d['weight'] for d in daily[pol].values()) / total_weight
+        total_shortfall = sum(d['shortfall'] for d in daily[pol].values())
+        out[pol] = dict(total_cost=total_cost, weighted_avg_wait=weighted_wait, total_shortfall=total_shortfall,
+                         daily=daily[pol])
+
+    max_util = dict(naive=max(naive_hours.values()) / MAX_HOURS_WEEK,
+                     greedy=greedy_summary['utilization'].max() if len(greedy_summary) else 0,
+                     ilp=ilp_summary['utilization'].max() if len(ilp_summary) else 0)
+    return out, max_util
+
+
+if __name__ == '__main__':
+    ca = pd.read_csv('dataset/client_arrivals.csv')
+    ops = pd.read_csv('dataset/operations.csv')
+    br = pd.read_csv('dataset/branches.csv').set_index('branch_id')
+    emp_raw = pd.read_csv('dataset/employees.csv')
+    emp_raw['skills'] = emp_raw['skills'].str.split(',')
+
+    import json
+    all_out = {}
+    for bid in ['BR01', 'BR02', 'BR03']:
+        out, max_util = week_summary(ca, ops, br, emp_raw, bid)
+        all_out[bid] = {'summary': out, 'max_util': max_util}
+        print(f"\n=== {bid}, неделя (Пн-Сб) ===")
+        for pol in ['naive', 'greedy', 'ilp']:
+            r = out[pol]
+            print(f"  {pol:7s}: ФОТ/нед={r['total_cost']:7.0f} руб., ожидание(взв.)={r['weighted_avg_wait']:5.1f} мин, "
+                  f"суммарный недобор={r['total_shortfall']:.0f} окно-час, макс.загрузка сотрудника={max_util[pol]*100:.0f}%")
+
+    with open('week_comparison.json', 'w') as f:
+        json.dump({b: {'summary': {p: {k: v for k, v in d.items() if k != 'daily'} for p, d in v['summary'].items()},
+                        'max_util': v['max_util']} for b, v in all_out.items()}, f, indent=2, default=str)
+
+```
+```срет_расписанием.py
+import pandas as pd
+from schedule_ilp import schedule_week_ilp
+
+# Загрузка данных
+ca = pd.read_csv('dataset/client_arrivals.csv')
+ops = pd.read_csv('dataset/operations.csv')
+br = pd.read_csv('dataset/branches.csv').set_index('branch_id')
+emp = pd.read_csv('dataset/employees.csv')
+emp['skills'] = emp['skills'].str.split(',')
+
+all_rows = []
+
+for branch_id in ['BR01', 'BR02', 'BR03']:
+    print(f"Генерация расписания для {branch_id}...")
+    results, _ = schedule_week_ilp(ca, ops, emp, br, branch_id)
+
+    for weekday, data in results.items():
+        for a in data['assignments']:
+            all_rows.append({
+                'branch_id': branch_id,
+                'weekday': weekday,
+                'employee_id': a['employee_id'],
+                'start': a['start'],
+                'end': a['end'],
+                'lunch_hour': a.get('lunch_hour'),
+                'serving_hours': ', '.join(map(str, a['serving_hours'])),
+                'paid_hours': a['paid_hours'],
+                'shift_cost': a['shift_cost']
+            })
+
+df_all = pd.DataFrame(all_rows)
+df_all.to_excel('schedules_all_branches.xlsx', index=False)
+
+print(f"Готово! Всего назначений: {len(df_all)}")
+print("Файл: schedules_all_branches.xlsx")
+```
