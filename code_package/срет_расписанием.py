@@ -1,5 +1,5 @@
 import pandas as pd
-from week_pipeline import schedule_week_ilp
+from schedule_ilp import schedule_week_ilp
 
 # Загрузка данных
 ca = pd.read_csv('dataset/client_arrivals.csv')

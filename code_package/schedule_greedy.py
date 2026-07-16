@@ -11,7 +11,7 @@ schedule_greedy.py
 import pandas as pd
 import numpy as np
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import List, Optional, Tuple, Dict
 from required_windows import required_windows_table
 
 from config import MAX_WORK_TIME, MAX_WORK_TIME_BEFORE_LAUNCH, MIN_WORK_TIME, WEEKDAY_HOURS, MAX_HOURS_WEEK, MIN_TIME_BETWEEN_BREAK_AND_END
@@ -35,8 +35,25 @@ class Pattern:
 
 
 def generate_patterns(open_hour: int, close_hour: int, max_span: int = MAX_WORK_TIME,
-                       min_span: int = MIN_WORK_TIME, lunch_required_from_span: int = MAX_WORK_TIME_BEFORE_LAUNCH):
-    """Генерирует непересекающиеся по смыслу варианты смен для отделения с часами [open_hour, close_hour)."""
+                       min_span: int = MIN_WORK_TIME, lunch_required_from_span: int = MAX_WORK_TIME_BEFORE_LAUNCH) -> List[Pattern]:
+    """
+    Генерирует все допустимые варианты смен для одного рабочего дня.
+
+    Для каждого возможного часа начала и допустимой продолжительности
+    строит непрерывный интервал [start, end). Если смена длиннее
+    lunch_required_from_span, перебираются варианты с одним обеденным
+    часом (не в начале и не в конце), иначе обед не предусмотрен.
+
+    Args:
+        open_hour: час открытия отделения.
+        close_hour: час закрытия (сам этот час уже не работает).
+        max_span: максимальная продолжительность смены.
+        min_span: минимальная продолжительность смены.
+        lunch_required_from_span: порог, после которого обед обязателен.
+
+    Returns:
+        Список объектов Pattern.
+    """
     patterns = []
     for start in range(open_hour, close_hour):
         for span in range(min_span, max_span + 1):
@@ -56,12 +73,34 @@ def generate_patterns(open_hour: int, close_hour: int, max_span: int = MAX_WORK_
 
 def schedule_day(employees: pd.DataFrame, req: pd.DataFrame, open_hour: int, close_hour: int,
                   n_windows_max: int, weekly_hours_used: dict = None,
-                  max_hours_week: int = MAX_HOURS_WEEK, max_hours_day: int = MAX_WORK_TIME):
+                  max_hours_week: int = MAX_HOURS_WEEK, max_hours_day: int = MAX_WORK_TIME) -> Tuple[List[Dict], pd.DataFrame, List[str], Dict]:
     """
-    employees: employee_id, grade, skills(list), hourly_cost, branch_id
-    req: DataFrame из required_windows_table (hour, R_total, R_credit, R_mortgage)
-    weekly_hours_used: {employee_id: часов уже отработано на этой неделе} — для многодневного режима
-    Возвращает: assignments (list of dict), coverage_df (итоговое покрытие по часам), unresolved (list warnings)
+    Жадно распределяет сотрудников отделения по сменам на один день.
+
+    Алгоритм последовательно закрывает дефицит окон трёх уровней:
+    mortgage, credit, total. Для каждого уровня выбирается час с
+    максимальным дефицитом и ищется сотрудник/смена, максимально
+    уменьшающие суммарный дефицит.
+
+    Args:
+        employees: DataFrame сотрудников отделения (employee_id, grade,
+            skills, hourly_cost_rub).
+        req: DataFrame из required_windows_table (hour, R_total,
+            R_credit, R_mortgage).
+        open_hour: час открытия отделения.
+        close_hour: час закрытия.
+        n_windows_max: физический максимум окон.
+        weekly_hours_used: словарь {employee_id: отработано часов на
+            неделе}, для многодневного планирования.
+        max_hours_week: недельный лимит часов.
+        max_hours_day: максимальная длина смены (учтена через generate_patterns).
+
+    Returns:
+        Кортеж (assignments, coverage_df, unresolved, weekly_hours_used):
+        - assignments: список dict с информацией о каждой смене,
+        - coverage_df: DataFrame с требуемым и фактическим покрытием,
+        - unresolved: список предупреждений о нехватке ресурсов,
+        - weekly_hours_used: обновлённый словарь отработанных часов.
     """
     weekly_hours_used = dict(weekly_hours_used or {})
     hours = list(req['hour'])
@@ -162,7 +201,7 @@ def schedule_day(employees: pd.DataFrame, req: pd.DataFrame, open_hour: int, clo
     return assignments, coverage_df, unresolved, weekly_hours_used
 
 def schedule_week(client_arrivals: pd.DataFrame, operations: pd.DataFrame, employees: pd.DataFrame,
-                   branches: pd.DataFrame, branch_id: str):
+                   branches: pd.DataFrame, branch_id: str) -> tuple[dict[str, dict], pd.DataFrame]:
     """
     Масштабирование schedule_day на всю рабочую неделю одного отделения.
     Часы, использованные сотрудником, переносятся день в день (недельный лимит 40ч соблюдается сквозно).

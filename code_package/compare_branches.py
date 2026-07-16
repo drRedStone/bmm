@@ -15,7 +15,8 @@ from compare_policies import naive_schedule, coverage_from_assignments, avg_wait
 
 from config import WEEKDAY_HOURS
 
-WEEKDAY_EN = 'Monday' # Это для таблицы сравнения графиков по отделниям на 1 день
+
+WEEKDAY_EN = 'Monday' # Это для таблицы сравнения графиков по отделниям на 1 день (на понедельник)
 
 
 def compare_branch(ca: pd.DataFrame, ops: pd.DataFrame, br: pd.DataFrame,

@@ -14,6 +14,7 @@ from required_windows import required_windows_table, erlang_c_wait_minutes
 from schedule_greedy import schedule_week
 from schedule_ilp import schedule_week_ilp
 from compare_policies import coverage_from_assignments, avg_wait_for_coverage
+from typing import Tuple, Dict
 
 from config import MAX_WORK_TIME, MAX_WORK_TIME_BEFORE_LAUNCH, WEEKDAY_HOURS, MIN_WORK_TIME, MAX_HOURS_WEEK
 
@@ -74,7 +75,7 @@ def naive_schedule_week(employees: pd.DataFrame, n_windows_max: int, max_hours_w
 
 
 def week_summary(ca: pd.DataFrame, ops: pd.DataFrame, br: pd.DataFrame,
-                  emp_raw: pd.DataFrame, branch_id: str):
+                  emp_raw: pd.DataFrame, branch_id: str) -> Tuple[Dict, Dict]:
     """
     Строит расписание на всю неделю тремя политиками (naive/greedy/ilp) для
     одного отделения и агрегирует результат — недельный ФОТ, средневзвешенное
