@@ -28,69 +28,53 @@ from schedule_ilp import schedule_week_ilp
 from compare_policies import get_weekly_metrics
 from required_windows import required_windows_unconstrained
 
-# ═══════════════════════════════════════════
-#  Константы (бывшие магические числа)
-# ═══════════════════════════════════════════
-# --- Перебор составов ---
-DEFAULT_MAX_JUNIOR: int = 6
-DEFAULT_MAX_MIDDLE: int = 6
-DEFAULT_MAX_SENIOR: int = 6
-DEFAULT_TARGET_WAIT: float = 40.0          # минут
-STAFF_MULTIPLIER: int = 3                 # общее число сотрудников ≤ STAFF_MULTIPLIER * n_win
-
-# --- Параметры сотрудников (значения по умолчанию для create_staff) ---
-DEFAULT_MAX_HOURS_WEEK: int = 40
-DEFAULT_MAX_HOURS_DAY: int = 9
-DEFAULT_LUNCH_MIN: int = 60
-
-# --- Визуализация: детальный график ---
-DETAIL_FIGSIZE: Tuple[int, int] = (16, 6)
-DETAIL_WIDTH_RATIOS: List[int] = [3, 2]
-SCATTER_ALL_COLOR: str = 'lightgray'
-SCATTER_ALL_SIZE: int = 30
-SCATTER_BEST_COLOR: str = 'orange'
-SCATTER_BEST_SIZE: int = 120
-SCATTER_BEST_EDGECOLOR: str = 'black'
-SCATTER_BEST_ZORDER: int = 5
-# Ширины столбцов таблицы детального графика (6 колонок)
-DETAIL_TABLE_COLWIDTHS: List[float] = [0.1, 0.1, 0.1, 0.18, 0.15, 0.12]
-
-# --- Визуализация: сводный отчёт ---
-COMPARATIVE_FIGSIZE: Tuple[int, int] = (16, 12)
-BAR_WIDTH: float = 0.35
-BAR_COLOR_RED: str = 'red'
-LEGEND_LOC: str = 'lower center'
-LEGEND_BBOX: Tuple[float, float] = (0.5, -0.25)
-LEGEND_NCOL: int = 2
-# Ширины столбцов таблицы лучших составов (5 колонок)
-TABLE_COLWIDTHS: List[float] = [0.12, 0.25, 0.18, 0.22, 0.18]
-TABLE_FONTSIZE: int = 9
-TABLE_TITLE_FONTSIZE: int = 12
-PARETO_COLOR: str = 'steelblue'
-PARETO_SIZE: int = 50
-ANNOTATE_XYTEXT: Tuple[int, int] = (5, 5)
-ANNOTATE_FONTSIZE: int = 7
-SAVE_DPI: int = 150
-
-# --- Имена выходных файлов ---
-BEST_CSV: str = 'best_compositions.csv'
-PARETO_CSV_PATTERN: str = 'pareto_{bid}.csv'
-ALL_VARIANTS_CSV_PATTERN: str = 'all_variants_{bid}.csv'
-DETAIL_PNG_PATTERN: str = 'detail_{bid}.png'
-COMPARATIVE_PNG: str = 'comparative_report.png'
-COMPARATIVE_PARETO_PNG: str = 'comparative_pareto.png'
-REPORT_JSON: str = 'report.json'
-
-# --- Ключи JSON ---
-JSON_BEST_KEY: str = 'best_compositions'
-JSON_PARETO_KEY: str = 'pareto_fronts'
-JSON_ALL_KEY: str = 'all_variants'
-
-# --- Главный запуск (значения можно менять при вызове) ---
-MAIN_MAX_JUNIOR: int = 6
-MAIN_MAX_MIDDLE: int = 6
-MAIN_MAX_SENIOR: int = 6
-MAIN_TARGET_WAIT: float = 40.0
+from config import (
+    DEFAULT_MAX_JUNIOR,
+    DEFAULT_MAX_MIDDLE,
+    DEFAULT_MAX_SENIOR,
+    DEFAULT_TARGET_WAIT,
+    STAFF_MULTIPLIER,
+    DEFAULT_MAX_HOURS_WEEK,
+    DEFAULT_MAX_HOURS_DAY,
+    DEFAULT_LUNCH_MIN,
+    DETAIL_FIGSIZE,
+    DETAIL_WIDTH_RATIOS,
+    SCATTER_ALL_COLOR,
+    SCATTER_ALL_SIZE,
+    SCATTER_BEST_COLOR,
+    SCATTER_BEST_SIZE,
+    SCATTER_BEST_EDGECOLOR,
+    SCATTER_BEST_ZORDER,
+    DETAIL_TABLE_COLWIDTHS,
+    COMPARATIVE_FIGSIZE,
+    BAR_WIDTH,
+    BAR_COLOR_RED,
+    LEGEND_LOC,
+    LEGEND_BBOX,
+    LEGEND_NCOL,
+    TABLE_COLWIDTHS,
+    TABLE_FONTSIZE,
+    TABLE_TITLE_FONTSIZE,
+    PARETO_COLOR,
+    PARETO_SIZE,
+    ANNOTATE_XYTEXT,
+    ANNOTATE_FONTSIZE,
+    SAVE_DPI,
+    BEST_CSV,
+    PARETO_CSV_PATTERN,
+    ALL_VARIANTS_CSV_PATTERN,
+    DETAIL_PNG_PATTERN,
+    COMPARATIVE_PNG,
+    COMPARATIVE_PARETO_PNG,
+    REPORT_JSON,
+    JSON_BEST_KEY,
+    JSON_PARETO_KEY,
+    JSON_ALL_KEY,
+    MAIN_MAX_JUNIOR,
+    MAIN_MAX_MIDDLE,
+    MAIN_MAX_SENIOR,
+    MAIN_TARGET_WAIT,
+)
 
 
 # ----------------------------------------------------------------------
@@ -293,7 +277,7 @@ def optimize_staff_for_branch(
         return {'best': None, 'pareto': pd.DataFrame(), 'all': pd.DataFrame()}
 
     # Определяем число процессов (не более 16 и не более числа комбинаций)
-    num_workers: int = min(multiprocessing.cpu_count() * 2, len(combos), 16)
+    num_workers: int = min(multiprocessing.cpu_count(), len(combos), 16)
     if num_workers <= 0:
         num_workers = 1
 
