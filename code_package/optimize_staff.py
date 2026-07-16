@@ -1,11 +1,10 @@
 """
-optimize_staff.py
-=================
 Подбор оптимального состава штата (junior, middle, senior) для
 отделения банка с использованием существующих модулей проекта.
 
 Все числовые параметры вынесены в именованные константы в начале модуля.
 Реализована многопроцессная проверка комбинаций с индикатором прогресса.
+Функции снабжены полными аннотациями типов и документирующими строками.
 """
 import math
 import os
@@ -13,13 +12,13 @@ import traceback
 import pandas as pd
 import numpy as np
 from itertools import product
-from typing import Dict, Optional, List, Tuple
+from typing import Dict, Optional, List, Tuple, Any
 import matplotlib.pyplot as plt
 import json
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
-from tqdm import tqdm   # <-- потребуется установить: pip install tqdm
+from tqdm import tqdm
 
 from config import (
     WERGES, SKILLS, WEEKDAY_HOURS,
@@ -33,74 +32,87 @@ from required_windows import required_windows_unconstrained
 #  Константы (бывшие магические числа)
 # ═══════════════════════════════════════════
 # --- Перебор составов ---
-DEFAULT_MAX_JUNIOR   = 10
-DEFAULT_MAX_MIDDLE   = 10
-DEFAULT_MAX_SENIOR   = 10
-DEFAULT_TARGET_WAIT  = 40.0          # минут
-STAFF_MULTIPLIER     = 3             # общее число сотрудников ≤ STAFF_MULTIPLIER * n_win
+DEFAULT_MAX_JUNIOR: int = 6
+DEFAULT_MAX_MIDDLE: int = 6
+DEFAULT_MAX_SENIOR: int = 6
+DEFAULT_TARGET_WAIT: float = 40.0          # минут
+STAFF_MULTIPLIER: int = 3                 # общее число сотрудников ≤ STAFF_MULTIPLIER * n_win
 
 # --- Параметры сотрудников (значения по умолчанию для create_staff) ---
-DEFAULT_MAX_HOURS_WEEK = 40
-DEFAULT_MAX_HOURS_DAY  = 9
-DEFAULT_LUNCH_MIN      = 60
+DEFAULT_MAX_HOURS_WEEK: int = 40
+DEFAULT_MAX_HOURS_DAY: int = 9
+DEFAULT_LUNCH_MIN: int = 60
 
 # --- Визуализация: детальный график ---
-DETAIL_FIGSIZE         = (16, 6)
-DETAIL_WIDTH_RATIOS    = [3, 2]
-SCATTER_ALL_COLOR      = 'lightgray'
-SCATTER_ALL_SIZE       = 30
-SCATTER_BEST_COLOR     = 'orange'
-SCATTER_BEST_SIZE      = 120
-SCATTER_BEST_EDGECOLOR = 'black'
-SCATTER_BEST_ZORDER    = 5
+DETAIL_FIGSIZE: Tuple[int, int] = (16, 6)
+DETAIL_WIDTH_RATIOS: List[int] = [3, 2]
+SCATTER_ALL_COLOR: str = 'lightgray'
+SCATTER_ALL_SIZE: int = 30
+SCATTER_BEST_COLOR: str = 'orange'
+SCATTER_BEST_SIZE: int = 120
+SCATTER_BEST_EDGECOLOR: str = 'black'
+SCATTER_BEST_ZORDER: int = 5
 # Ширины столбцов таблицы детального графика (6 колонок)
-DETAIL_TABLE_COLWIDTHS = [0.1, 0.1, 0.1, 0.18, 0.15, 0.12]
+DETAIL_TABLE_COLWIDTHS: List[float] = [0.1, 0.1, 0.1, 0.18, 0.15, 0.12]
 
 # --- Визуализация: сводный отчёт ---
-COMPARATIVE_FIGSIZE    = (16, 12)
-BAR_WIDTH              = 0.35
-BAR_COLOR_RED          = 'red'
-LEGEND_LOC             = 'lower center'
-LEGEND_BBOX            = (0.5, -0.25)
-LEGEND_NCOL            = 2
+COMPARATIVE_FIGSIZE: Tuple[int, int] = (16, 12)
+BAR_WIDTH: float = 0.35
+BAR_COLOR_RED: str = 'red'
+LEGEND_LOC: str = 'lower center'
+LEGEND_BBOX: Tuple[float, float] = (0.5, -0.25)
+LEGEND_NCOL: int = 2
 # Ширины столбцов таблицы лучших составов (5 колонок)
-TABLE_COLWIDTHS        = [0.12, 0.25, 0.18, 0.22, 0.18]
-TABLE_FONTSIZE         = 9
-TABLE_TITLE_FONTSIZE   = 12
-PARETO_COLOR           = 'steelblue'
-PARETO_SIZE            = 50
-ANNOTATE_XYTEXT        = (5, 5)
-ANNOTATE_FONTSIZE      = 7
-SAVE_DPI               = 150
+TABLE_COLWIDTHS: List[float] = [0.12, 0.25, 0.18, 0.22, 0.18]
+TABLE_FONTSIZE: int = 9
+TABLE_TITLE_FONTSIZE: int = 12
+PARETO_COLOR: str = 'steelblue'
+PARETO_SIZE: int = 50
+ANNOTATE_XYTEXT: Tuple[int, int] = (5, 5)
+ANNOTATE_FONTSIZE: int = 7
+SAVE_DPI: int = 150
 
 # --- Имена выходных файлов ---
-BEST_CSV             = 'best_compositions.csv'
-PARETO_CSV_PATTERN   = 'pareto_{bid}.csv'
-ALL_VARIANTS_CSV_PATTERN = 'all_variants_{bid}.csv'
-DETAIL_PNG_PATTERN   = 'detail_{bid}.png'
-COMPARATIVE_PNG      = 'comparative_report.png'
-COMPARATIVE_PARETO_PNG = 'comparative_pareto.png'   # доп. файл для Парето-фронтов
-REPORT_JSON          = 'report.json'
+BEST_CSV: str = 'best_compositions.csv'
+PARETO_CSV_PATTERN: str = 'pareto_{bid}.csv'
+ALL_VARIANTS_CSV_PATTERN: str = 'all_variants_{bid}.csv'
+DETAIL_PNG_PATTERN: str = 'detail_{bid}.png'
+COMPARATIVE_PNG: str = 'comparative_report.png'
+COMPARATIVE_PARETO_PNG: str = 'comparative_pareto.png'
+REPORT_JSON: str = 'report.json'
 
 # --- Ключи JSON ---
-JSON_BEST_KEY   = 'best_compositions'
-JSON_PARETO_KEY = 'pareto_fronts'
-JSON_ALL_KEY    = 'all_variants'
+JSON_BEST_KEY: str = 'best_compositions'
+JSON_PARETO_KEY: str = 'pareto_fronts'
+JSON_ALL_KEY: str = 'all_variants'
 
 # --- Главный запуск (значения можно менять при вызове) ---
-MAIN_MAX_JUNIOR = 6
-MAIN_MAX_MIDDLE = 6
-MAIN_MAX_SENIOR = 6
-MAIN_TARGET_WAIT = 40.0
+MAIN_MAX_JUNIOR: int = 6
+MAIN_MAX_MIDDLE: int = 6
+MAIN_MAX_SENIOR: int = 6
+MAIN_TARGET_WAIT: float = 40.0
 
 
 # ----------------------------------------------------------------------
 # Вспомогательные функции
 # ----------------------------------------------------------------------
 def create_staff(junior: int, middle: int, senior: int, branch_id: str) -> pd.DataFrame:
-    """Создаёт синтетический штат сотрудников для одного отделения."""
-    employees = []
-    emp_id = 0
+    """
+    Создаёт синтетический штат сотрудников для одного отделения.
+
+    Args:
+        junior: Количество сотрудников грейда junior.
+        middle: Количество сотрудников грейда middle.
+        senior: Количество сотрудников грейда senior.
+        branch_id: Идентификатор отделения (например, 'BR01').
+
+    Returns:
+        DataFrame с колонками, соответствующими структуре employees.csv.
+        Если все три параметра равны нулю, возвращается пустой DataFrame
+        с корректными колонками.
+    """
+    employees: List[Dict[str, Any]] = []
+    emp_id: int = 0
     for grade, count in [('junior', junior), ('middle', middle), ('senior', senior)]:
         for _ in range(count):
             employees.append({
@@ -127,10 +139,25 @@ def compute_staff_lower_bounds(
     operations: pd.DataFrame,
     branch_id: str
 ) -> Tuple[int, int, int]:
-    """Возвращает минимально необходимое количество сотрудников каждого грейда."""
-    max_total = 0
-    max_credit = 0
-    max_mortgage = 0
+    """
+    Возвращает минимально необходимое количество сотрудников каждого грейда,
+    основанное на пиковых требованиях к окнам (без учёта физического числа окон).
+
+    Просматривает все рабочие дни недели, определяет максимальное количество
+    требуемых окон (общих, кредитных, ипотечных) и вычисляет минимальное
+    число junior, middle и senior, способное покрыть эти пики.
+
+    Args:
+        client_arrivals: DataFrame с данными о прибытии клиентов.
+        operations: DataFrame с информацией об операциях.
+        branch_id: Идентификатор отделения.
+
+    Returns:
+        Кортеж из трёх целых чисел: (min_junior, min_middle, min_senior).
+    """
+    max_total: int = 0
+    max_credit: int = 0
+    max_mortgage: int = 0
     for day in WEEKDAY_HOURS:
         req = required_windows_unconstrained(client_arrivals, operations, branch_id, day)
         if req.empty:
@@ -139,22 +166,37 @@ def compute_staff_lower_bounds(
         max_credit = max(max_credit, req['R_credit'].max())
         max_mortgage = max(max_mortgage, req['R_mortgage'].max())
 
-    min_senior = max_mortgage
-    min_middle_plus_senior = max_credit
-    min_middle = max(0, min_middle_plus_senior - min_senior)
-    min_total = max_total
-    min_junior = max(0, min_total - min_middle - min_senior)
+    min_senior: int = max_mortgage
+    min_middle_plus_senior: int = max_credit
+    min_middle: int = max(0, min_middle_plus_senior - min_senior)
+    min_total: int = max_total
+    min_junior: int = max(0, min_total - min_middle - min_senior)
 
     return int(min_junior), int(min_middle), int(min_senior)
 
 
 def _eval_one_combination(
     args: Tuple[int, int, int, pd.DataFrame, pd.DataFrame, pd.DataFrame, str, int]
-) -> Optional[Dict]:
+) -> Optional[Dict[str, Any]]:
     """
     Вычисляет метрики для одной комбинации (junior, middle, senior).
-    Возвращает словарь с результатами или None, если комбинация невалидна.
-    Эта функция вызывается параллельно в пуле процессов.
+    Функция предназначена для запуска в параллельных процессах.
+
+    Args:
+        args: Кортеж, содержащий:
+            j (int): число junior,
+            m (int): число middle,
+            s (int): число senior,
+            client_arrivals (pd.DataFrame),
+            operations (pd.DataFrame),
+            branches (pd.DataFrame),
+            branch_id (str),
+            n_win (int) – не используется, оставлено для совместимости.
+
+    Returns:
+        Словарь с ключами 'junior', 'middle', 'senior', 'weekly_cost',
+        'avg_wait_min', 'total_shortfall', либо None, если произошла ошибка
+        (например, ILP не нашёл решения).
     """
     j, m, s, client_arrivals, operations, branches, branch_id, n_win = args
     try:
@@ -171,7 +213,7 @@ def _eval_one_combination(
             'total_shortfall': metrics['total_shortfall']
         }
     except Exception:
-        # В реальном коде можно логировать, но для чистоты просто пропускаем
+        # Ошибки внутри процесса не должны рушить общий цикл
         return None
 
 
@@ -189,19 +231,47 @@ def optimize_staff_for_branch(
     target_wait: Optional[float] = DEFAULT_TARGET_WAIT,
     budget: Optional[float] = None,
     verbose: bool = True
-) -> Dict:
-    """Подбирает оптимальный состав штата для одного отделения."""
+) -> Dict[str, Any]:
+    """
+    Подбирает оптимальный состав штата для одного отделения.
+
+    Перебирает все комбинации (junior, middle, senior) в заданных диапазонах,
+    для каждой запускает недельное ILP-планирование, собирает метрики и
+    строит Парето-фронт по недобору окон и недельному ФОТ.
+
+    Args:
+        client_arrivals: Данные о прибытии клиентов.
+        operations: Данные об операциях.
+        branches: Информация об отделениях (индексирован по branch_id).
+        branch_id: Идентификатор отделения.
+        max_junior: Верхняя граница перебора для junior.
+        max_middle: Верхняя граница перебора для middle.
+        max_senior: Верхняя граница перебора для senior.
+        target_wait: Максимально допустимое среднее время ожидания (мин).
+            Варианты с большим ожиданием отфильтровываются.
+        budget: Максимальный недельный ФОТ; варианты дороже отбрасываются.
+        verbose: Печатать ли промежуточные сообщения.
+
+    Returns:
+        Словарь с ключами:
+        - 'best': кортеж (junior, middle, senior, cost, wait, shortfall)
+           лучшего (первого по Парето) варианта.
+        - 'pareto': DataFrame Парето-оптимальных вариантов.
+        - 'all': DataFrame всех допустимых вариантов, прошедших фильтры.
+        Если не найдено ни одного допустимого варианта, 'best' = None,
+        а DataFrame'ы пусты.
+    """
     min_j, min_m, min_s = compute_staff_lower_bounds(client_arrivals, operations, branch_id)
     if verbose:
         print(f"Минимальные требования: junior>={min_j}, middle>={min_m}, senior>={min_s}")
 
-    n_win = int(branches.loc[branch_id, 'n_windows'])
-    max_total = STAFF_MULTIPLIER * n_win
+    n_win: int = int(branches.loc[branch_id, 'n_windows'])
+    max_total: int = STAFF_MULTIPLIER * n_win
 
     # Автоматически сужаем верхние границы, чтобы не перебирать заведомо недопустимые значения
-    max_j = min(max_junior, max_total - min_m - min_s)
-    max_m = min(max_middle, max_total - min_j - min_s)
-    max_s = min(max_senior, max_total - min_j - min_m)
+    max_j: int = min(max_junior, max_total - min_m - min_s)
+    max_m: int = min(max_middle, max_total - min_j - min_s)
+    max_s: int = min(max_senior, max_total - min_j - min_m)
     max_j = max(max_j, min_j)
     max_m = max(max_m, min_m)
     max_s = max(max_s, min_s)
@@ -210,7 +280,7 @@ def optimize_staff_for_branch(
         print(f"Пределы перебора: junior {min_j}..{max_j}, middle {min_m}..{max_m}, senior {min_s}..{max_s}")
 
     # Собираем комбинации
-    combos = []
+    combos: List[Tuple] = []
     for j in range(min_j, max_j + 1):
         for m in range(min_m, max_m + 1):
             for s in range(min_s, max_s + 1):
@@ -222,12 +292,12 @@ def optimize_staff_for_branch(
             print("Нет комбинаций, удовлетворяющих базовым ограничениям.")
         return {'best': None, 'pareto': pd.DataFrame(), 'all': pd.DataFrame()}
 
-    # Определяем число процессов (не более 8 и не более числа комбинаций)
-    num_workers = min(multiprocessing.cpu_count() * 2, len(combos), 16)
+    # Определяем число процессов (не более 16 и не более числа комбинаций)
+    num_workers: int = min(multiprocessing.cpu_count() * 2, len(combos), 16)
     if num_workers <= 0:
         num_workers = 1
 
-    results = []
+    results: List[Dict[str, Any]] = []
     if verbose:
         print(f"Обработка {len(combos)} комбинаций (процессов: {num_workers})...")
 
@@ -239,7 +309,6 @@ def optimize_staff_for_branch(
                 if res is not None:
                     results.append(res)
     except RuntimeError:
-        # Fallback для сред, где ProcessPoolExecutor не работает (например, интерактивный режим)
         if verbose:
             print("Многопроцессность недоступна, переходим на последовательный режим.")
         for combo in tqdm(combos, desc="Последовательный перебор"):
@@ -248,7 +317,7 @@ def optimize_staff_for_branch(
                 results.append(res)
 
     # Применяем фильтры по бюджету и целевому ожиданию
-    filtered = []
+    filtered: List[Dict[str, Any]] = []
     for r in results:
         if budget is not None and r['weekly_cost'] > budget:
             continue
@@ -281,11 +350,23 @@ def optimize_staff_for_branch(
 # ----------------------------------------------------------------------
 # Анализ и визуализация
 # ----------------------------------------------------------------------
-def analyze_optimization_results(all_results: Dict[str, Dict]) -> Dict:
-    """Собирает лучшие составы и Парето-фронты по всем отделениям."""
-    best_rows = []
-    pareto_dict = {}
-    full_dict = {}
+def analyze_optimization_results(all_results: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Собирает лучшие составы и Парето-фронты по всем отделениям.
+
+    Args:
+        all_results: Словарь, где ключ — branch_id, значение — результат
+            optimize_staff_for_branch (словарь с best, pareto, all).
+
+    Returns:
+        Словарь с ключами:
+        - 'best': DataFrame с лучшими составами всех отделений.
+        - 'pareto': dict {branch_id: DataFrame} Парето-фронтов.
+        - 'full': dict {branch_id: DataFrame} всех вариантов.
+    """
+    best_rows: List[Dict[str, Any]] = []
+    pareto_dict: Dict[str, pd.DataFrame] = {}
+    full_dict: Dict[str, pd.DataFrame] = {}
     for bid, res in all_results.items():
         if res['best'] is None:
             continue
@@ -306,11 +387,18 @@ def analyze_optimization_results(all_results: Dict[str, Dict]) -> Dict:
     }
 
 
-def plot_branch_detail(branch_id: str, branch_results: Dict, save_path: Optional[str] = None) -> None:
+def plot_branch_detail(branch_id: str, branch_results: Dict[str, Any],
+                       save_path: Optional[str] = None) -> None:
     """
     Для одного отделения строит подробный график:
     - Слева: диаграмма рассеяния всех вариантов (лучший выделен оранжевым),
     - Справа: таблица всех вариантов.
+
+    Args:
+        branch_id: Идентификатор отделения.
+        branch_results: Словарь с ключами 'all' (DataFrame), 'best' (кортеж),
+            'pareto' (DataFrame) — результат optimize_staff_for_branch.
+        save_path: Если указан, график сохраняется в файл; иначе показывается на экране.
     """
     df_all = branch_results['all']
     best = branch_results['best']
@@ -363,13 +451,20 @@ def plot_branch_detail(branch_id: str, branch_results: Dict, save_path: Optional
         plt.show()
 
 
-def plot_comparative_report(analysis: Dict, save_path: Optional[str] = None) -> None:
+def plot_comparative_report(analysis: Dict[str, Any], save_path: Optional[str] = None) -> None:
     """
     Сводный отчёт по всем отделениям:
     - Столбцы стоимости и ожидания (легенда под графиком),
     - Таблица лучших составов,
     - Парето-фронты для каждого отделения (адаптивная сетка).
+
     При большом числе отделений Парето-фронты выводятся на отдельной фигуре.
+
+    Args:
+        analysis: Результат работы analyze_optimization_results.
+        save_path: Базовое имя файла для сохранения (без расширения).
+            Основной отчёт сохраняется как save_path.png,
+            Парето-фронты — как save_path_pareto.png.
     """
     best_df = analysis['best']
     if best_df.empty:
@@ -460,8 +555,15 @@ def plot_comparative_report(analysis: Dict, save_path: Optional[str] = None) -> 
             fig2.show()
 
 
-def save_report_files(analysis: Dict, output_dir: str) -> None:
-    """Сохраняет все отчётные файлы, включая детальные плоты для каждого отделения."""
+def save_report_files(analysis: Dict[str, Any], output_dir: str) -> None:
+    """
+    Сохраняет все отчётные файлы: CSV с лучшими составами, Парето-фронтами,
+    всеми вариантами, а также графики и JSON.
+
+    Args:
+        analysis: Результат analyze_optimization_results.
+        output_dir: Путь к папке для сохранения файлов.
+    """
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     best_df = analysis['best']
     best_df.to_csv(f"{output_dir}/{BEST_CSV}", index=False)
@@ -500,7 +602,16 @@ def save_report_files(analysis: Dict, output_dir: str) -> None:
     print(f"Все файлы отчёта сохранены в {output_dir}")
 
 
-def generate_json_report(analysis: Dict) -> str:
+def generate_json_report(analysis: Dict[str, Any]) -> str:
+    """
+    Генерирует JSON-строку с полными результатами.
+
+    Args:
+        analysis: Результат analyze_optimization_results.
+
+    Returns:
+        Строка с отформатированным JSON.
+    """
     best_df = analysis['best']
     report = {
         JSON_BEST_KEY: best_df.to_dict(orient='records'),
@@ -524,10 +635,11 @@ if __name__ == '__main__':
     ops = pd.read_csv('dataset/operations.csv')
     br = pd.read_csv('dataset/branches.csv').set_index('branch_id')
 
-    all_results = {}
+    all_results: Dict[str, Dict[str, Any]] = {}
     for bid in ['BR01', 'BR02', 'BR03']:
         print(f"\n===== Оптимизация штата для {bid} =====")
         if bid == 'BR03':
+            # Для отделения с ограниченными ресурсами ослабляем целевое ожидание
             res = optimize_staff_for_branch(
                 ca, ops, br, bid,
                 max_junior=MAIN_MAX_JUNIOR,
@@ -552,13 +664,14 @@ if __name__ == '__main__':
             print(f"  Недельный ФОТ: {cost:,.0f} руб.")
             print(f"  Среднее время ожидания: {wait:.1f} мин")
             print(f"  Недобор окон: {sf:.1f} окно-часов")
-            print("\nВсе допустимые варианты:")
-            display_df = res['all'].rename(columns={
+            pareto_df = res['pareto']
+            print(f"\nПарето-оптимальные варианты ({len(pareto_df)} шт.):")
+            print(pareto_df.rename(columns={
                 'junior': 'junior', 'middle': 'middle', 'senior': 'senior',
                 'weekly_cost': 'ФОТ/нед', 'avg_wait_min': 'Ожидание, мин',
                 'total_shortfall': 'Недобор, окно-ч'
-            })
-            print(display_df.to_string(index=False))
+            }).to_string(index=False))
+            print("(Полный список всех вариантов сохранён в CSV-файлах)")
         else:
             print("Не найдено допустимых вариантов. "
                   "Возможные причины: слишком жёсткий порог ожидания или недостаточный диапазон перебора.")
